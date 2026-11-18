@@ -420,7 +420,7 @@ async def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
-            if by_flush:
+            if by_flush and not core.outbox.stopping:  # a stop comes first
                 unit.marks.budget_ran_out()
             job.fail(late)
         except (LogprobeError, OSError) as error:

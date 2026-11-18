@@ -2714,10 +2714,32 @@ def test_the_list_limit_says_which_deadline_set_it(
 ) -> None:
     unit = cast("Any", None)
     now = time.perf_counter()
-    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: 1.0)
+    seen: list[float] = []
+
+    def flush_left(_core: Any, _unit: Any, at: float) -> float:  # noqa: ANN401
+        seen.append(at)
+        return 5.0 - (at - now) - 0.000_001  # the flush ends just before the read
+
+    monkeypatch.setattr(_stream, "_list_time_left", flush_left)
     limit, by_flush = _stream._list_limit_of(cast("Any", None), unit, now + 5.0)
-    assert (limit, by_flush) == (1.0, True)
-    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: None)
+    # One clock reading for both deadlines: the flush, 1 us earlier, sets it.
+    assert by_flush is True
+    assert limit == pytest.approx(now + 5.0 - seen[0] - 0.000_001)
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit, _at: None)
     limit, by_flush = _stream._list_limit_of(cast("Any", None), unit, now + 5.0)
     assert by_flush is False
     assert 4.0 < limit <= 5.0
+
+
+def test_a_stop_keeps_a_done_flush_from_turning_into_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marks = _marks.Marks("emu")
+    marks.state = "done"
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: 0.0)
+    for stopping, after in ((True, "done"), (False, "timed_out")):
+        marks.state = "done"
+        core = SimpleNamespace(outbox=SimpleNamespace(stopping=stopping))
+        unit = SimpleNamespace(marks=marks)
+        _stream._flush_overran(cast("Any", core), cast("Any", unit), "cut")
+        assert marks.state == after

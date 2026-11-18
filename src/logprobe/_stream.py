@@ -638,7 +638,9 @@ def _list_wait_step(
     return None if wait == 0 else min(TICK, wait)
 
 
-def _list_time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
+def _list_time_left(
+    core: _CoreBase[Any], unit: _Unit, now: float | None = None
+) -> float | None:
     """The seconds until the device's nearest deadline, for a list while reading.
 
     As `_time_left`, except after the flush marker came back (``done``): the
@@ -649,8 +651,8 @@ def _list_time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
     request = marks.request
     if marks.state == "done" and request is not None:
         waited = core.outbox.backpressure().get(unit.serial, 0.0)
-        return request.left(unit.serial, perf_counter(), waited)
-    return _time_left(core, unit)
+        return request.left(unit.serial, perf_counter() if now is None else now, waited)
+    return _time_left(core, unit, now)
 
 
 def _list_limit(core: _CoreBase[Any], unit: _Unit, deadline: float) -> float:
@@ -666,8 +668,9 @@ def _list_limit_of(
     Both come from one reading of the clocks, so the flag says which deadline
     the returned limit is.
     """
-    left = _list_time_left(core, unit)
-    limit = deadline - perf_counter()
+    now = perf_counter()
+    left = _list_time_left(core, unit, now)
+    limit = deadline - now
     if left is not None and left < limit:
         return left, True
     return limit, False
@@ -711,8 +714,8 @@ def _flush_overran(core: _CoreBase[Any], unit: _Unit, cause: str | None) -> None
     the flush ``done``: its lines are delivered at once.
     """
     marks = unit.marks
-    if cause is None or marks.state != "done":
-        return
+    if cause is None or marks.state != "done" or core.outbox.stopping:
+        return  # a stop that came meanwhile does not turn the flush into a timeout
     left = _list_time_left(core, unit)
     if left is not None and left <= 0:
         marks.overran()
@@ -792,7 +795,7 @@ def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
-            if by_flush:
+            if by_flush and not core.outbox.stopping:  # a stop comes first
                 unit.marks.budget_ran_out()
             job.fail(late)
         except (LogprobeError, OSError) as error:
@@ -1526,7 +1529,9 @@ def _open_first(core: _Core, unit: _Unit, *, since: bool) -> ShellStream:
     return unit.conn
 
 
-def _time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
+def _time_left(
+    core: _CoreBase[Any], unit: _Unit, now: float | None = None
+) -> float | None:
     """The seconds until the device's nearest deadline, or None when it has none.
 
     The deadlines are the flush budget and the start marker's time (see
@@ -1538,7 +1543,7 @@ def _time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
     if core.flush is not None:
         marks.adopt(core.flush)
         waited = core.outbox.backpressure().get(unit.serial, 0.0)
-    return marks.nearest(perf_counter(), waited)
+    return marks.nearest(perf_counter() if now is None else now, waited)
 
 
 def _attempt_deadline(core: _CoreBase[Any], unit: _Unit) -> float | None:
