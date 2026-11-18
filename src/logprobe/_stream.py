@@ -1852,6 +1852,7 @@ def _finish(core: _CoreBase[Any], unit: _Unit, error: LogprobeError | None) -> N
     if core.outbox.killed:
         core.outbox.clear()  # nobody will take what is still queued
     unit.marks.end_unfinished(requested=core.flush is not None)
+    unit.feeder.tell_later_gaps()
     unit.ended_at = datetime.now(UTC)
     unit.error = error
     if error is not None:

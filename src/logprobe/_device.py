@@ -250,7 +250,8 @@ class Device:
 
         This runs ``logcat -d`` (``-t N`` with ``tail``) once, in the format
         the stream readers use, and returns when logcat has printed everything.
-        It is a snapshot: no gaps and no counters are reported. The result is
+        It is a snapshot: it returns no gaps and no counters, and logs the
+        gaps it finds (``chatty`` notices) as a stream does. The result is
         as large as the device's log buffers; with a 2 MiB ring on API 36 that
         is about 200,000 lines, all held in memory, so pass ``tail`` or a
         condition when that matters. A final line without a line feed is

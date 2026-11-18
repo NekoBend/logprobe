@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import statistics
 import time
 from datetime import UTC, datetime, timedelta
@@ -947,3 +948,83 @@ class TestChattyNotice:
     def test_the_count_ignores_trailing_blanks_and_one_line_wording(self):
         assert chatty_loss("uid=1000(system) expire 1 line ") == 1
         assert chatty_loss("uid=1000 /system/bin/lmkd expire 12 lines") == 12
+
+
+class TestGapLogging:
+    """The first gap of each reason is a WARNING; later ones are told at the end."""
+
+    def test_the_first_gap_of_a_reason_warns_and_later_ones_are_counted(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        feeder = Feeder("s1")
+        with caplog.at_level("WARNING", logger="logprobe"):
+            feeder.feed(data(line(0, "a"), notice(5), notice(2), notice(4)))
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("s1: a gap in the log (device_reported)")
+        assert "dropped 5 lines" in warnings[0]
+        assert (feeder.gaps, feeder.lost) == (3, 11)
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="logprobe"):
+            feeder.tell_later_gaps()
+            feeder.tell_later_gaps()  # told once: the counts start again
+        assert [r.getMessage() for r in caplog.records] == [
+            "s1: 2 more gaps in the log after the first of each kind "
+            "(device_reported 2)"
+        ]
+
+    def test_nothing_is_told_at_the_end_without_later_gaps(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        feeder = Feeder("s1")
+        with caplog.at_level("WARNING", logger="logprobe"):
+            feeder.feed(data(line(0, "a"), notice(5)))
+            feeder.tell_later_gaps()
+        assert len(caplog.records) == 1  # the first gap only
+
+    def test_each_reason_warns_once_and_the_end_line_counts_by_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        feeder = Feeder("s1")
+        now = datetime.now(UTC)
+        gaps = [
+            Gap("s1", reason, "disconnected", now, None)
+            for reason in ("ring_rotated", "continuity_unknown", "ring_rotated")
+        ]
+        with caplog.at_level("WARNING", logger="logprobe"):
+            for gap in gaps:
+                feeder._count_gap(gap)
+            feeder.feed(data(notice(5)))
+            feeder.tell_later_gaps()
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m.split(":")[1].strip() for m in messages[:3]] == [
+            "a gap in the log (ring_rotated)",
+            "a gap in the log (continuity_unknown)",
+            "a gap in the log (device_reported)",
+        ]
+        assert "after a reconnect (disconnected)" in messages[0]
+        assert messages[3:] == [
+            "s1: 1 more gaps in the log after the first of each kind (ring_rotated 1)"
+        ]
+
+    def test_a_raising_handler_does_not_stop_a_read_or_its_end(self) -> None:
+        feeder = Feeder("s1")
+
+        class Raising(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                raise RuntimeError(record.getMessage())
+
+            def handle(self, record: logging.LogRecord) -> bool:
+                self.emit(record)
+                return True
+
+        log = logging.getLogger("logprobe")
+        handler = Raising()
+        log.addHandler(handler)
+        try:
+            out = feeder.feed(data(line(0, "a"), notice(5), notice(2)))  # no exception
+            feeder.tell_later_gaps()  # no exception
+        finally:
+            log.removeHandler(handler)
+        assert shape(out) == [1, "Gap", 1, "Gap", 1]
+        assert (feeder.gaps, feeder.lost, feeder.entries) == (2, 7, 3)

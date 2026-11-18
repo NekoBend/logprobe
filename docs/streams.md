@@ -38,8 +38,10 @@ in memory. A full log buffer can hold hundreds of thousands of lines, so pass
   N entries.
 - `where` and the shortcuts are those of a stream; see
   [conditions.md](conditions.md).
-- A snapshot reports no gaps and no summary. A `chatty` notice is returned as
-  an ordinary entry. logprobe's own marker lines are left out.
+- A snapshot returns no gaps and no summary; it logs the gaps it finds (a
+  `chatty` notice), as described under [Gaps](#gaps-where-lines-may-be-missing-or-repeated).
+  A `chatty` notice is returned as an ordinary entry. logprobe's own marker
+  lines are left out.
 - A final line without a line feed is returned only when logcat exited
   normally.
 - With a `Package` term or `package=`, the dump first takes one list of the
@@ -303,6 +305,16 @@ The reasons mean:
 
 Gaps are not filtered by the condition. `gap.to_dict()` returns a dict that
 `json.dumps` accepts, with `"schema": "logprobe.gap/1"`.
+
+Gaps are also logged on the `logprobe` logger, so that they are seen without
+`items()`: the first gap of each reason on a device is a WARNING, later ones of
+that reason are only counted, and when the device's read ends one WARNING gives
+those counts (none when there were no later gaps), also when the read ended
+with an error or a stop. A dump (`Device.dump`, `Device.adump`) logs its gaps
+the same way, also when it fails or is cancelled. The messages are logged on
+the thread of the device's reader (the event loop for an asyncio stream or
+`adump`), so a slow logging handler slows the read; use a queue-based handler
+(`logging.handlers.QueueHandler`) for a slow destination.
 
 ## Reconnect and resume
 
