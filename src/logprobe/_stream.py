@@ -717,8 +717,8 @@ def _flush_overran(core: _CoreBase[Any], unit: _Unit, cause: str | None) -> None
     if cause is None or marks.state != "done" or core.outbox.stopping:
         return  # a stop that came meanwhile does not turn the flush into a timeout
     left = _list_time_left(core, unit)
-    if left is not None and left <= 0:
-        marks.overran()
+    if left is not None and left <= 0 and not core.outbox.stopping:
+        marks.overran()  # the stop is checked again: it may come while left is read
 
 
 def _set_boundary(unit: _Unit, result: ShellResult | None) -> None:
