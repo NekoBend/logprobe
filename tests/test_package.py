@@ -110,3 +110,41 @@ def test_an_unknown_name_is_an_attribute_error() -> None:
     with pytest.raises(AttributeError, match="has no attribute 'nope'"):
         _ = logprobe.nope  # ty: ignore[unresolved-attribute]
     assert not hasattr(logprobe, "nope")
+
+
+def test_the_version_is_the_installed_one_and_read_only_when_used() -> None:
+    """``logprobe.__version__`` is the installed distribution's version;
+    ``import logprobe`` does not import importlib.metadata, ``dir()`` lists the
+    name before it is read, the metadata is read once, and without metadata
+    the version is ``0+unknown`` (a new isolated interpreter, as above)."""
+    from importlib.metadata import version
+
+    assert logprobe.__version__ == version("logprobe")
+    root = str(Path(logprobe.__file__).parent.parent)
+    code = f"""
+import sys
+sys.path.insert(0, {root!r})
+import logprobe
+print("importlib.metadata" in sys.modules)
+print("__version__" in dir(logprobe), "__version__" in vars(logprobe))
+import importlib.metadata as metadata
+calls = []
+def missing(name):
+    calls.append(name)
+    raise metadata.PackageNotFoundError(name)
+metadata.version = missing
+print(logprobe.__version__, logprobe.__version__, calls)
+"""
+    result = subprocess.run(  # the test's own code on this interpreter
+        [sys.executable, "-I", "-S", "-B", "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "False",  # import logprobe leaves importlib.metadata alone
+        "True False",  # listed by dir(), not read yet
+        "0+unknown 0+unknown ['logprobe']",  # no metadata: the fallback, read once
+    ]
