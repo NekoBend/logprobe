@@ -217,6 +217,11 @@ class Device:
     def shell(self, args: Sequence[str], timeout: float | None = 30.0) -> ShellResult:
         """Run a command on the device and return its exit status and output.
 
+        When the connection ends before the device reports an exit status
+        (``exit_status`` None), ``stderr`` may end with the received part of
+        a stderr packet that was cut off, while ``stdout`` holds only the
+        packets that arrived whole.
+
         Args:
             args: The program and its arguments, e.g. ``["getprop", "ro.x"]``.
             timeout: One overall limit in seconds for connecting and running
@@ -263,10 +268,20 @@ class Device:
             level: Keep entries at this level or above.
             tag: Keep entries with this tag, or any of these tags.
             message: Keep entries whose message contains this text.
-            package: Not supported yet; raises ``NotImplementedError``.
+            package: Keep entries of these apps (see `Package`).
             pid: Keep entries of this process id, or any of these.
 
         The keyword shortcuts and ``where`` are combined with AND.
+
+        With a condition on the app (``Package`` or ``package``), the dump
+        first reads the list of every installed package with its uid (``pm
+        list packages -U``, or ``dumpsys package packages`` on devices that do
+        not know ``-U``; each command may take 5 seconds) and judges every line
+        by that list alone: a line of an app the list does not name belongs to
+        no watched package. Lines of a watched app's isolated processes (such
+        as a WebView renderer, app ids 90000 to 99999) are not attributed to
+        the app, and how an app installed only for a secondary user is listed
+        is not verified. See `Package` for the rest of what is not promised.
 
         Returns:
             The entries in log order.
@@ -279,9 +294,12 @@ class Device:
                 and the end of ``stderr``), ``device_lost`` (the connection
                 closed without an exit status; the partial line is dropped),
                 ``device_not_found``, ``device_offline``,
-                ``device_unauthorized`` or ``adb_server_unavailable``.
+                ``device_unauthorized`` or ``adb_server_unavailable``;
+                ``device_command_failed`` when the package list failed (a
+                non-zero exit status, none at all, no usable output, or more
+                than 5 seconds; ``details`` has ``serial``, ``command``,
+                ``exit_status`` and ``stderr``).
             TimeoutError: If the device sent nothing for 30 seconds.
-            NotImplementedError: If the condition contains a ``Package`` term.
             TypeError: If an argument has the wrong type, or ``tail`` is a bool.
             ValueError: If ``tail`` is below 1 or a shortcut value is invalid.
         """
@@ -289,7 +307,6 @@ class Device:
             where, level=level, tag=tag, message=message, package=package, pid=pid
         )
         _adb.logcat_argv(dump=True, tail=tail, t=None)  # check tail before any I/O
-        _dump.check_condition(condition)
         return _dump.run_dump(self._address, self.serial, condition, tail)
 
     async def adump(
@@ -319,7 +336,6 @@ class Device:
             where, level=level, tag=tag, message=message, package=package, pid=pid
         )
         _adb.logcat_argv(dump=True, tail=tail, t=None)  # check tail before any I/O
-        _dump.check_condition(condition)
         # Imported here: the asyncio dump uses _astream, which imports _stream,
         # which imports this module; and so that ``import logprobe`` does not
         # import asyncio.

@@ -11,9 +11,11 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
-from logprobe import _aadb, _adb, _astream, _dump
+from logprobe import _aadb, _adb, _astream, _dump, _marks
+from logprobe._attribution import ListJob
 
 if TYPE_CHECKING:
+    from logprobe._adb import ShellResult
     from logprobe._conditions import Condition
     from logprobe._entry import LogEntry
 
@@ -23,6 +25,21 @@ async def _open(
 ) -> _aadb.AsyncShellStream:
     """Open the shell connection that runs ``argv`` on the device."""
     return await _aadb.aopen_shell(address, serial, argv)
+
+
+async def _take_list(address: _adb.ServerAddress, serial: str) -> ListJob:
+    """Read the device's package list (the blocking `_dump._take_list`)."""
+    job = ListJob()
+    while not job.finished:
+        ran: ShellResult | TimeoutError
+        try:
+            ran = await _aadb.arun_shell(
+                address, serial, job.argv, _marks.COMMAND_LIMIT
+            )
+        except TimeoutError as error:
+            ran = error
+        _dump.take_ran(job, ran)
+    return job
 
 
 async def arun_dump(
@@ -35,12 +52,13 @@ async def arun_dump(
 
     Each network read waits at most ``_dump.IDLE_TIMEOUT`` seconds for bytes,
     as in the blocking dump; there is no limit for the whole dump. Output is
-    taken as the asyncio stream takes it: what is ready after a wait, up to
-    about 8 KiB, is fed in one piece, and then the task lets the event loop
-    run other tasks. A batch can exceed that by less than the part of one
+    taken as the asyncio stream takes it: what one network read brought, up
+    to about 8 KiB, is fed in one piece, and then the task lets the event
+    loop run other tasks. A batch can exceed that by less than the part of one
     packet that one network read brought (up to 64 KiB), which is never
-    split. Cancelling the task closes the connection and lets
-    ``CancelledError`` pass.
+    split. A condition on the app reads the package list first, as in the
+    blocking dump. Cancelling the task closes the connection (also that of a
+    list command) and lets ``CancelledError`` pass.
 
     Raises:
         TimeoutError: If the device sent nothing for ``_dump.IDLE_TIMEOUT``
@@ -49,7 +67,11 @@ async def arun_dump(
     """
     argv = _adb.logcat_argv(dump=True, tail=tail, t=None)
     await _aadb.arequire_shell_v2(address, serial)
-    collector = _dump.Collector(serial, condition)
+    keep: _dump.Keep | None = None
+    if condition is not None and _dump.needs_list(condition):
+        job = await _take_list(address, serial)
+        keep = _dump.package_filter(serial, condition, job)
+    collector = _dump.Collector(serial, condition, keep)
     async with await _open(address, serial, argv) as stream:
         stream.set_timeout(_dump.IDLE_TIMEOUT)
         while True:

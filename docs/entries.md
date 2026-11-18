@@ -23,7 +23,7 @@ changed copy. Entries compare equal field by field and are hashable.
 | `uid` | `int \| None` | The uid from a `-v uid` column. See [uid and uid_raw](#uid-and-uid_raw). |
 | `uid_raw` | `str \| None` | The `-v uid` column as printed. |
 | `serial` | `str \| None` | The adb serial of the device the line came from; `None` for lines read from a file or given as text. |
-| `package` | `str \| None` | The app package the line belongs to. Not implemented yet: `None` in every entry logprobe reads. |
+| `package` | `str \| None` | The watched app package the line belongs to. A dump or stream whose condition has a `Package` term sets it on the entries it delivers (see [conditions.md](conditions.md#package)); for a uid that several watched packages share, it is the first of them by name. `None` otherwise, and for lines read from a file or given as text. |
 | `parsed` | `bool` | `False` when the line was not recognised. See [Unparsed lines](#unparsed-lines). |
 | `truncated` | `bool` | `True` when the line was longer than the line limit. See [Truncated lines](#truncated-lines). |
 
@@ -52,7 +52,9 @@ Dumps and streams ask the device for the `threadtime` format with the
   the naive host time instead (see [Unparsed lines](#unparsed-lines));
 - `uid_raw` filled when the device prints a uid, and `uid` when logprobe
   can read it (see [uid and uid_raw](#uid-and-uid_raw));
-- `serial` set to the device's serial.
+- `serial` set to the device's serial;
+- `package` set only by a dump or stream with a `Package` term, when a
+  watched package owns the line's uid.
 
 Lines from a device are cut at 65,536 bytes (see
 [Truncated lines](#truncated-lines)).

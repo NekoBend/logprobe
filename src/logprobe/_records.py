@@ -91,7 +91,9 @@ class DeviceSummary:
         gaps: Number of gaps reported.
         lost: Total of the lost-line counts that are known.
         reconnects: Number of reconnections.
-        unattributed: Lines for which the owning app could not be determined.
+        unattributed: With a condition on the app, lines whose app could not
+            be determined, plus lines that may have been judged with an
+            outdated package list (see `logprobe.Package`); 0 without one.
         flush: Outcome of the flush request: ``not_requested``, ``done``,
             ``timed_out``, ``failed`` or ``cancelled``.
         error: The error that ended this device (its reader, or the start

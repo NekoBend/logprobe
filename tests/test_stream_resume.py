@@ -677,7 +677,8 @@ def test_a_check_that_ends_on_a_full_queue_does_not_receive_again_after_a_stop(
     outbox = _stream.Outbox(1, 1 << 20)
     lines = [at(10 + k / 10, name) for k, name in enumerate("abcd")]
     core = _stream._Core([unit], outbox)
-    _stream._enqueue(core, unit, unit.feeder.feed(b"".join(lines)))  # queue full
+    chunks = unit.feeder.feed(b"".join(lines))
+    _stream._enqueue(core, unit, chunks, time.perf_counter())  # queue full
     plan = _resume.plan_resume(unit.feeder, "disconnected", BASE)
     unit.feeder.begin_connection(plan.check)
     clock = _Clock()

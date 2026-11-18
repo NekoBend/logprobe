@@ -325,6 +325,14 @@ class Condition(ABC):
         """
         return False
 
+    def _package_names(self) -> frozenset[str]:
+        """The names of the :class:`Package` terms below this node.
+
+        Unlike :meth:`packages`, the packages of ``Crash`` and ``Anr`` are not
+        included: those terms read the message text.
+        """
+        return _NO_FIELDS
+
     def _membership(
         self, member: Callable[[LogEntry, frozenset[str]], bool | None]
     ) -> Callable[[LogEntry], bool | None]:
@@ -480,6 +488,9 @@ class _Junction(Condition):
     def _has_package(self) -> bool:
         return any(c._has_package() for c in self._children)
 
+    def _package_names(self) -> frozenset[str]:
+        return frozenset().union(*(c._package_names() for c in self._children))
+
     def _json(self) -> dict[str, Any]:
         return {self._JSON_KEY: [c._json() for c in self._children]}
 
@@ -582,6 +593,9 @@ class Not(Condition):
 
     def _has_package(self) -> bool:
         return self._operand._has_package()
+
+    def _package_names(self) -> frozenset[str]:
+        return self._operand._package_names()
 
     def _json(self) -> dict[str, Any]:
         return {"not": self._operand._json()}
@@ -826,6 +840,97 @@ class Package(_Members):
     """Matches entries attributed to one of the packages (``entry.package``).
 
     An entry that carries no package never matches.
+
+    A stream or a dump with this condition finds the package of each line
+    from its uid and the device's list of installed packages, and sets
+    ``entry.package`` of the entries it delivers. Only the names of
+    ``Package`` terms are watched. Not promised:
+
+    - Every line getting a verdict with its app: a stream counts the lines it
+      had to judge without a usable list, or without a list that could check
+      their app, in ``DeviceSummary.unattributed`` (see `logprobe.stream`);
+      the points below say which lines it does not count.
+    - Telling apart packages that share a uid: they match each other's lines.
+      A watched package that runs under a system uid (below 10000) matches
+      every process of that uid (a WARNING says so). ``entry.package`` is the
+      first watched owner by name.
+    - Lines of an app's isolated processes (app ids 90000 to 99999, for
+      example a WebView renderer) are not attributed to the app, and not
+      counted as unattributed either.
+    - Other users of the device are matched by app id (the uid modulo
+      100000). How an app installed only for a secondary user is listed is
+      not verified; its lines may not be attributed.
+    - Lines of a removed app in the backlog belong to no watched package.
+      With ``since`` None a stream tells the backlog by the device clock read
+      just before the list; a clock step back can make lines of a newly
+      installed app look older, and they are then judged as belonging to no
+      watched package. If the next list shows a watched package under their
+      uid, they are counted as unattributed (with a WARNING).
+    - When a watched app gets a new uid (a reinstall) or is removed, the lines
+      judged with the old uid since the previous list are counted as
+      unattributed, even when they were judged right. Until a list that starts
+      30 seconds or more after that one (normally the next list taken every 30
+      seconds; a list taken for a read in between does not end it), or that
+      shows a watched app under the old uid, every line of the old uid that is
+      read after that (a system uid too, whatever else the condition asks) is
+      delivered as if no package owned it and counted too (a reader that is
+      behind the device may still read late lines of the app). When a
+      watched app turns up under a uid whose lines were judged as not its own
+      since the previous list (a uid that was freed and given again, an app
+      that appeared after its lines, or one that joined a shared uid, also
+      one of another watched app or a system uid), those lines are counted
+      the same way. The lines of one uid are counted once per list, and
+      every line of that uid counts, whether or not the condition had to ask
+      about its package. The lines read while the list taken every 30 seconds
+      runs are judged with the previous list; when the new list may have been
+      taken before them, they are counted by the list after it. No line is
+      counted twice.
+    - A watched app that no list ever names, because it was installed after
+      one list and removed before the list taken for a read of its lines (a
+      stream that is behind the device, or a reconnect that reads the missed
+      lines again), is not attributed: its lines are delivered as if no
+      package owned them. Those whose verdict depends on their app are
+      counted as unattributed when they were logged at or after the device
+      clock read before the first list, or always with ``since="now"`` or
+      when that clock could not be read (a WARNING names the cause of the
+      device's first unattributed line: for such a line, that the app of its
+      uid could not be checked). This holds for every app id from 10000 to
+      19999 that the list taken for a read does not name, until a list names
+      it: the lines of an app that is not watched, installed and removed while
+      the stream was behind, are counted too, and the lines of an app id that
+      no list ever names (perhaps an app installed only for another user,
+      which is not verified) are counted for as long as the stream runs. When
+      the list taken for the read names the app id (another app got it after
+      the watched app was removed), the lines are judged as that app's, and
+      the reuse alone does not count them; they are still counted when the
+      app id is one a watched package recently left. A line's verdict
+      depends on its app when the condition, evaluated with the line's app
+      unknown (three-valued: true, false or undecided), is undecided. A
+      line that a term without packages excludes (``Tag("other")`` under
+      ``Package(A) & Tag("keep")``) is not delivered whether or not it is
+      A's, so not counting it loses nothing. The
+      evaluation looks only at the terms, so such a line under
+      ``Package(A) | ~Package(A)`` is counted although it is delivered either
+      way. Lines that look older than that clock (after a clock step back)
+      are not counted either.
+    - A dump judges by the list read just before it.
+    - A stream does not read a device while it takes the device's package
+      list at the start (at most 5 seconds) or for a read with a line whose
+      app id the latest list cannot explain: reading pauses only for such a
+      read, normally 0.03-0.14 seconds and at most 2 seconds, counted from
+      when its bytes arrived. An older logd may skip lines then, and
+      ``detect_skips`` does not see it. The list taken every 30 seconds runs
+      in the background: the lines read meanwhile are judged with the
+      previous list, and the new one applies from the next network read on,
+      or from a read that waits for it. The asyncio stream judges a network
+      read in parts of about 8 KiB, so a network read whose later part waits
+      for that list has its earlier parts judged with the previous list,
+      where the blocking stream judges the whole of it with the new one (it
+      also judges a network read of more than 2048 lines in parts). The two
+      may then deliver different lines and count different lines as
+      unattributed; each counts every line it judged with a list that the
+      new one shows was outdated.
+    - ``Crash`` and ``Anr`` with a package read the message text, not the uid.
     """
 
     __slots__ = ()
@@ -854,6 +959,9 @@ class Package(_Members):
 
     def _has_package(self) -> bool:
         return True
+
+    def _package_names(self) -> frozenset[str]:
+        return frozenset(self._values)
 
     def _membership(
         self, member: Callable[[LogEntry, frozenset[str]], bool | None]

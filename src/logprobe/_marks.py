@@ -84,12 +84,24 @@ def marker_argv(token: str) -> list[str]:
     return ["log", "-t", MARKER_TAG, token]
 
 
+# The last second a `datetime` can hold (9999-12-31 23:59:59 UTC): a clock
+# beyond it cannot be compared with the time of a log line.
+_LATEST_CLOCK = 253_402_300_799
+
+
 def parse_clock(stdout: bytes) -> int | None:
-    """The device clock in whole seconds from the output of ``date +%s``, or None."""
+    """The device clock in whole seconds from the output of ``date +%s``, or None.
+
+    None also when the number is beyond the year 9999: no device clock is, so
+    such an output is not a time.
+    """
     text = stdout.strip()
     if not text.isdigit() or not text.isascii():
         return None
-    return int(text)
+    if len(text) > len(str(_LATEST_CLOCK)):  # before int(): no huge numbers
+        return None
+    clock = int(text)
+    return clock if clock <= _LATEST_CLOCK else None
 
 
 def since_t_arg(clock: int) -> str:
@@ -298,6 +310,16 @@ class Marks:
         """A new connection was made: a marker that could not be written may be."""
         self._hold = False
 
+    def overran(self) -> None:
+        """The lines before the flush marker took longer than the budget.
+
+        A reader calls this when those lines (routed already, the flush
+        ``done``) waited for something, such as a package list, until the
+        budget was used up: the flush is then ``timed_out`` after all.
+        """
+        if self.state == "done":
+            self.state = "timed_out"
+
     def end_unfinished(self, *, requested: bool) -> None:
         """The reader ends: a requested flush that has no result is ``cancelled``."""
         if requested and not self.over:
@@ -310,8 +332,9 @@ class Marks:
 
         Before the start marker everything is dropped, and the start marker's
         own place starts delivery. The flush marker's place ends it: what
-        follows is dropped, and the flush is ``done``. `MarkerArrived` itself
-        is never returned.
+        follows is dropped, and the flush is ``done`` unless it ended already
+        (its budget ran out while an earlier part of the same read waited).
+        `MarkerArrived` itself is never returned.
         """
         phase = self.phase
         if (
@@ -328,7 +351,8 @@ class Marks:
                     phase = Phase.DELIVERING
                 elif phase is Phase.DELIVERING:
                     phase = Phase.CLOSED
-                    self.state = "done"
+                    if not self.over:
+                        self.state = "done"
             elif phase is Phase.DELIVERING:
                 kept.append(segment)
             elif type(segment) is list:

@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import socket
 from collections import deque
+from time import perf_counter
 from typing import TYPE_CHECKING
 
 from logprobe._adb import (
@@ -30,6 +31,7 @@ from logprobe._adb import (
     DEFAULT_TIMEOUT,
     RECV_SIZE,
     Cancelled,
+    CommandTimeoutError,
     ServerAddress,
     ShellEvent,
     ShellResult,
@@ -253,6 +255,11 @@ class AsyncShellStream:
     stays in the stream, so the next call carries on without losing or
     repeating anything. Cancelling does not close the stream; the owner does,
     with :meth:`close` or ``async with``.
+
+    Attributes:
+        exit_status: The command's exit status (see above).
+        received_at: When the latest network read that brought bytes returned
+            (``time.perf_counter``); 0.0 before the first one.
     """
 
     def __init__(self, reader: _Reader, writer: asyncio.StreamWriter) -> None:
@@ -268,6 +275,7 @@ class AsyncShellStream:
         self._timeout: float | None = None
         self._cancelled: Callable[[], bool] | None = None
         self.exit_status: int | None = None
+        self.received_at = 0.0
 
     async def __aenter__(self) -> AsyncShellStream:
         return self
@@ -361,6 +369,7 @@ class AsyncShellStream:
         if not chunk:
             self._finished = True
             return
+        self.received_at = perf_counter()
         if parts:
             status, error = collect_parts(self._decoder, chunk, self._pending)
         else:
@@ -375,6 +384,14 @@ class AsyncShellStream:
             self._error = error
             self._finished = True
 
+    def needs_read(self) -> bool:
+        """Whether the next event needs a new network read.
+
+        False while decoded events are left, and once the end or an error is
+        known: the next call then returns without waiting for the device.
+        """
+        return not (self._pending or self._error or self._finished or self._closed)
+
     def decoded(self) -> int:
         """The number of events decoded already and not returned yet.
 
@@ -382,6 +399,16 @@ class AsyncShellStream:
         one. Closing the stream keeps them readable.
         """
         return len(self._pending)
+
+    def held_stderr(self) -> bytes:
+        """The received part of a stderr packet that is not complete yet.
+
+        `read` returns a packet only once it is complete; this is for an error
+        report when the command did not get that far.
+        """
+        if self._decoder.receiving != "stderr":
+            return b""
+        return bytes(self._partial)
 
     def close(self) -> None:
         """Close the connection at once. Safe to call more than once."""
@@ -443,23 +470,35 @@ async def arun_shell(
     no limit on the command; connecting and the handshake then use
     ``DEFAULT_TIMEOUT`` for each step.
 
+    When the connection ends without an exit status, the stderr of the result
+    ends with the received part of a stderr packet that was cut off; its
+    stdout holds only the packets that arrived whole.
+
     Raises:
-        TimeoutError: If everything did not finish within ``timeout`` seconds.
+        TimeoutError: If everything did not finish within ``timeout`` seconds
+            (a `CommandTimeoutError`, with the stderr received by then, the
+            received part of an unfinished stderr packet included).
         LogprobeError: As :func:`aopen_shell`, or ``adb_error`` on a protocol
             violation.
     """
     out = bytearray()
     err = bytearray()
+    opened: AsyncShellStream | None = None
     scope = asyncio.timeout(timeout)
     try:
         async with scope:
             step = DEFAULT_TIMEOUT if timeout is None else None
             async with await _open(address, serial, args, step) as stream:
+                opened = stream
                 while (event := await stream.read()) is not None:
                     (out if event[0] == "stdout" else err).extend(event[1])
     except TimeoutError:
         if not scope.expired():
             raise
+        if opened is not None:
+            err += opened.held_stderr()
         msg = f"command did not finish within {timeout} seconds"
-        raise TimeoutError(msg) from None
+        raise CommandTimeoutError(msg, bytes(err)) from None
+    if stream.exit_status is None:  # the connection ended inside a packet
+        err += stream.held_stderr()
     return ShellResult(stream.exit_status, bytes(out), bytes(err))

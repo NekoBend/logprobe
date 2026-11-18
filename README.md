@@ -22,6 +22,9 @@ not accepted while logprobe is in alpha.
   formats, from files (`read_file`) or any iterable of lines (`parse_lines`).
 - Filters entries with conditions such as
   `(Level >= "W") & Tag("ActivityManager")`.
+- Filters a device's lines by app (`Package(...)` or `package=`): it finds the
+  app of each line from its uid and the device's list of installed packages,
+  and sets `LogEntry.package`.
 - Writes entries as JSON Lines, JSON, CSV or plain text (`export_logs`).
 - Talks to the adb server over its socket protocol; it does not run
   `adb logcat`. It uses only the standard library, and `import logprobe` does
@@ -29,12 +32,11 @@ not accepted while logprobe is in alpha.
 
 ## Known gaps
 
-- Filtering by app package is not implemented. A `Package(...)` condition or the
-  `package=` shortcut raises `NotImplementedError` in `Device.dump()`,
-  `Device.adump()`, `stream()` and `astream()`. `Crash(package=...)` and
-  `Anr(package=...)` do work: they read the process name from the message.
-- Entries that logprobe reads always have `LogEntry.package` set to `None` for
-  now.
+- Filtering by app neither attributes nor counts the lines of a watched app's
+  isolated processes, such as a WebView renderer. How an app installed only
+  for another user is listed is not verified. A stream counts the other lines
+  it could not attribute in its summary, with the exceptions listed under
+  [Package](docs/conditions.md#package).
 - The tests use a fake adb server and logcat output recorded on Android 7.0
   (API 24) and API 36 emulators. Physical devices and other Android versions
   are untested.
@@ -124,10 +126,11 @@ count = export_logs(read_file("logcat.txt"), "logcat.jsonl")
 
 ## Filtering with conditions
 
-Build conditions from `Level`, `Tag`, `Message`, `Pid`, `Tid`, `Uid`, `Crash`
-and `Anr`, and combine them with `&`, `|` and `~`. Pass one as `where`. The
-keyword shortcuts (`level`, `tag`, `message`, `pid`) are combined with `where`
-using AND. A condition can also be called on a single entry:
+Build conditions from `Level`, `Tag`, `Message`, `Pid`, `Tid`, `Uid`,
+`Package`, `Crash` and `Anr`, and combine them with `&`, `|` and `~`. Pass one
+as `where`. The keyword shortcuts (`level`, `tag`, `message`, `package`, `pid`)
+are combined with `where` using AND. A condition can also be called on a single
+entry:
 
 ```python
 import logprobe

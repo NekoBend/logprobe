@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Final
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-__all__ = ["AID_NAMES", "parse_uid"]
+__all__ = ["AID_NAMES", "MAX_UID", "parse_uid"]
 
 # The platform AIDs whose name has at most 5 characters: the only names logcat
 # can print. Values from android_filesystem_config.h, nougat-release and main
@@ -79,7 +79,8 @@ AID_NAMES: Final[Mapping[str, int]] = MappingProxyType(
 _PER_USER = 100_000  # AID_USER_OFFSET
 _APP_START = 10_000  # AID_APP_START
 _ISOLATED_START = 90_000  # AID_ISOLATED_START since Android 10 (module docstring)
-_MAX_UID = 0xFFFF_FFFF
+#: The largest uid: uids are 32-bit unsigned numbers.
+MAX_UID = 0xFFFF_FFFF
 # Longest decimal uid (2**32 - 1) and the longest user or app id a name can
 # carry; anything longer is not a uid logcat printed.
 _MAX_UID_DIGITS = 10
@@ -109,7 +110,7 @@ def parse_uid(token: str) -> int | None:
     """
     number = _small_int(token, _MAX_UID_DIGITS)
     if number is not None:
-        return number if number <= _MAX_UID else None
+        return number if number <= MAX_UID else None
     known = AID_NAMES.get(token)
     if known is not None:
         return known
@@ -125,4 +126,4 @@ def parse_uid(token: str) -> int | None:
         return None
     base = _APP_START if rest[0] == "a" else _ISOLATED_START
     uid = user * _PER_USER + base + offset
-    return uid if uid <= _MAX_UID else None
+    return uid if uid <= MAX_UID else None

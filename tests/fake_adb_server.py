@@ -64,11 +64,14 @@ class Cut:
     not end in a newline cuts in the middle of a line. The undelivered rest
     of the payload is recorded in :attr:`ConnectionRecord.lost`. ``keep`` must
     be at least 0 and less than the packet size, otherwise nothing is cut.
+    With ``hold`` the connection stays open after the cut part, at a waiting
+    point of that name (as a :class:`Wait`), and is dropped only after it.
     """
 
     kind: Literal["stdout", "stderr"]
     data: bytes
     keep: int
+    hold: str | None = None
 
     def __post_init__(self) -> None:
         size = _HEADER_SIZE + len(self.data)
@@ -123,6 +126,8 @@ class ConnectionRecord:
     serial: str | None
     command: str
     t_value: str | None
+    # When the fake began to serve the command (``time.perf_counter``).
+    started_at: float = field(default_factory=time.perf_counter)
     stdout: bytearray = field(default_factory=bytearray)
     stderr: bytearray = field(default_factory=bytearray)
     omitted: bytearray = field(default_factory=bytearray)
@@ -487,6 +492,8 @@ class _Handler(socketserver.BaseRequestHandler):
                     target.extend(step.data[:payload_sent])
                     record.lost.extend(step.data[payload_sent:])
                     self._write_off(script.steps[number + 1 :], record)
+                    if step.hold is not None:
+                        self._wait_point(Wait(step.hold), script, record)
                     return  # closing the connection mid-packet is the point
                 else:
                     kind, data = step

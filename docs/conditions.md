@@ -216,27 +216,143 @@ The system server logs this line, not the app. Use `Anr(package=app)` to
 find an app's ANRs; an app-based test such as `Package(app) & Anr()` would
 not find them.
 
-### Package (not implemented yet)
+### Package
 
-`Package(*names)` is meant to match entries that belong to one of the
-given app packages, by comparing `entry.package`. It is not usable yet:
+`Package(*names)` matches an entry whose `package` is one of the given app
+packages. An entry without a package (`None`) never matches. Each name must
+be a plain package name (dot-separated segments of ASCII letters, digits and
+`_`, each starting with a letter); a process name such as
+`com.example.app:remote` raises `ValueError`.
 
-- Entries that logprobe reads always have `LogEntry.package` set to `None`
-  for now, so `Package(...)` called on them never matches. It does test the
-  field of an entry you build yourself.
-- `Device.dump()`, `Device.adump()`, `stream()` and `astream()` (and the
-  `Device.stream()` / `Device.astream()` methods) raise
-  `NotImplementedError` when the condition contains a `Package` term
-  anywhere, or when you pass the `package=` shortcut.
+```python
+from logprobe import Package
 
-You can construct it. Each name must be a plain package name
-(dot-separated segments of ASCII letters, digits and `_`, each starting with
-a letter); a process name such as `com.example.app:remote` raises
-`ValueError`.
+device.dump(Package("com.example.app"), level="W")
+device.dump(package=["com.example.app", "com.example.helper"])
+```
 
-To select an app's crashes and ANRs today, use `Crash(package=...)` and
-`Anr(package=...)`, which read the message text and do not need
-`entry.package`.
+`Device.dump()`, `Device.adump()`, `stream()` and `astream()` (and the
+`Device.stream()` / `Device.astream()` methods) accept a `Package` term
+anywhere in the condition, and the `package=` shortcut. They find the app of
+each line from its uid and set `entry.package` on the entries they deliver.
+Only the names of `Package` terms are watched. Entries from `read_file()` and
+`parse_lines()` have no package, so `Package(...)` never matches them.
+
+How the app of a line is found:
+
+- At the start, the dump or stream reads one list of every installed package
+  with its uid per device: `pm list packages -U`, or
+  `dumpsys package packages` when `pm` prints that it does not know `-U` (as
+  on Android 7) or prints no usable list. A stream remembers a device that
+  does not know `-U` and runs `dumpsys` directly for its later lists.
+- A dump judges every line by that one list, read before `logcat -d`: a line
+  whose uid the list does not name belongs to no watched package.
+- A stream with `since=None` reads the device clock once (`date +%s`) just
+  before the first list. A line logged before that clock whose uid the list
+  does not name belongs to an app that was removed before the list.
+- A stream takes the list again every 30 seconds in the background, to notice
+  a reinstall, and goes on reading meanwhile: the lines read while it runs
+  are judged with the previous list, and the new one applies from the next
+  network read on, or from a read that waits for it.
+- A line needs a list when its verdict depends on its app (below), its app
+  id is from 10000 to 19999, the latest list does not name that app id, the
+  line was logged at or after that clock (or there is no clock), and the app
+  id is not the old uid of a watched app (see the counted lines below). A read
+  with such a line makes the stream take a new list before it delivers the
+  read (when the 30-second list runs, the read waits for it first); while the
+  device has no usable list, a read starts no list. Reading that device
+  pauses for at most 2 seconds, counted from when the read's bytes arrived.
+  Two lists start at least 0.5 seconds apart, and a read starts a list only
+  when at least 1 second of its 2 seconds is left. An app id that a list taken
+  after its read did not name either needs no list until a list names it.
+- Packages that share a uid match each other's lines; `entry.package` is
+  then the first watched package by name.
+- A watched package that runs under a system uid (below 10000) matches every
+  process of that uid, and a WARNING says so.
+- The app id is the uid modulo 100000, so the lines of other users of the
+  device (secondary users) are matched by app id.
+- A line without a uid belongs to no watched package.
+
+A line's verdict depends on its app when the condition, evaluated with the
+line's app unknown (three-valued: true, false or undecided), is undecided:
+under `Package(a) | Tag("x")`, a line tagged `x` is delivered whatever its
+app, and it never needs a list. The evaluation looks only at the terms, so
+under `Package(a) | ~Package(a)` every line's verdict depends on its app,
+although each line is delivered either way.
+
+A stream counts in its device summary's `unattributed` the lines whose app
+it could not check, which makes the summary incomplete (`complete` is
+`False`). A dump has no summary and counts nothing. The stream counts:
+
+- a line that needs a list, when the device has no usable list (the last
+  list failed; the next one comes 30 seconds later), or when the list for its
+  read did not come within the 2 seconds. Such a line is judged as if no
+  package owned it. After a failed list the last list that succeeded still
+  decides the app ids it names; when the first list fails, every line whose
+  verdict depends on its app and whose app id is from 10000 to 19999 counts,
+  also one logged before the clock read before that list.
+- a line whose verdict depends on its app, when the list taken for its read
+  does not name its app id either and it was logged at or after the clock read
+  before the first list (any such line with `since="now"` or when that clock
+  could not be read): a watched app may have been installed and removed while
+  the stream was behind the device, and no list could check it. This
+  over-counts. The lines of an app that is not watched, installed and removed
+  meanwhile, count too, and so do the lines of an app id that no list ever
+  names (perhaps an app installed only for another user) for as long as the
+  stream runs.
+- the lines judged with a list that a newer list shows was outdated: when a
+  watched app got a new uid (a reinstall) or was removed, the lines of its old
+  uid since the previous list; when a watched app turns up under a uid whose
+  lines were judged as not its own (a uid freed and given again, an app that
+  appeared after its lines, or one that joined a shared uid), those lines.
+  Here every line of that uid counts, whether or not the condition had to ask
+  about its package, and a WARNING with the count comes with the newer list.
+- after a list shows that a watched app got a new uid or was removed, every
+  line of the old uid (a system uid too, whatever else the condition asks),
+  until a successful list that started 30 seconds or more after that one, or
+  one that shows a watched app under that uid: they may be late lines of the
+  app.
+
+In the first two cases only lines whose verdict depends on their app are
+counted: a line that a term without packages excludes (`Tag("other")` under
+`Package(A) & Tag("keep")`) would not be delivered whether or not it is A's.
+No line is counted twice. The summary, the messages and the extra device
+commands are described in
+[streams.md](streams.md#filter-by-app-extra-commands-and-messages).
+
+Not promised:
+
+- Telling apart packages that share a uid.
+- Attributing the lines of an app's isolated processes (app ids 90000 to
+  99999, for example a WebView renderer) to the app, or counting them.
+- Attributing an app installed only for a secondary user: how such an app is
+  listed is not verified.
+- Lines of a removed app in the backlog belong to no watched package. A step
+  back of the device clock can make lines of a newly installed app look older
+  than the clock read before the first list; they are then judged as belonging
+  to no watched package, and counted only if the next list shows a watched
+  package under their uid.
+- A watched app that no list ever names (installed after one list and removed
+  before the list taken for a read of its lines) is not attributed: its lines
+  are judged as if no package owned them, and counted as above unless they
+  look older than that clock. When that list names their app id (another app
+  got it after the watched app was removed), they are judged as that app's
+  lines, and the reuse alone does not count them; they are still counted when
+  the app id is one a watched package recently left (see above).
+- A dump judges by the list read just before it.
+- A stream does not read a device while it takes the list at the start (at
+  most 5 seconds) or for a read. An older logd may skip lines then, and
+  `detect_skips` does not see it.
+- The asyncio stream judges a network read in parts of about 8 KiB; the
+  blocking stream judges the whole network read (in parts above 2,048 lines).
+  When a later part of a network read waits for a list, the asyncio stream
+  has judged the earlier parts with the previous list, where the blocking
+  stream judges the whole read with the new one. The two may then deliver
+  different lines and count different lines as unattributed; each counts
+  every line it judged with a list that the newer one shows was outdated.
+
+`Crash(package=...)` and `Anr(package=...)` read the message text, not the
+uid, and do not need a package list.
 
 ## Keyword shortcuts
 
@@ -251,7 +367,8 @@ a term, and all terms and `where` are combined with AND.
 | `pid=123` | `Pid(123)` | an `int` |
 | `pid=[1, 2]` | `Pid(1, 2)` | a list or tuple of `int` |
 | `message="text"` | `Message.contains("text")` | one `str` |
-| `package=...` | `Package(...)` | not implemented yet: raises `NotImplementedError` |
+| `package="a.b"` | `Package("a.b")` | a `str` |
+| `package=["a.b", "c.d"]` | `Package("a.b", "c.d")` | a list or tuple of `str` |
 
 ```python
 # These two calls select the same entries.

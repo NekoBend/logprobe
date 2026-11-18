@@ -42,14 +42,19 @@ in memory. A full log buffer can hold hundreds of thousands of lines, so pass
   an ordinary entry. logprobe's own marker lines are left out.
 - A final line without a line feed is returned only when logcat exited
   normally.
+- With a `Package` term or `package=`, the dump first takes one list of the
+  device's installed packages (`pm list packages -U`, or
+  `dumpsys package packages`; each command may take 5 seconds) and judges
+  every line by it; see [conditions.md](conditions.md#package). An INFO names
+  each watched package that is not installed, and a WARNING each that runs
+  under a system uid.
 - `adump()` starts no thread and never starts the adb server. Invalid arguments
   raise when it is awaited. Cancelling the task closes the connection.
 
 Errors:
 
 - Before any I/O: `TypeError` for a wrong type (a bool is not a valid `tail`),
-  `ValueError` for `tail` below 1 or a bad shortcut value, and
-  `NotImplementedError` for a `Package` condition or `package=`.
+  and `ValueError` for `tail` below 1 or a bad shortcut value.
 - `LogprobeError` with code `adb_error` (for example the device lacks
   `shell_v2`, or the adb server refused the request, did not answer or broke
   the protocol; see [errors.md](errors.md#adb_error)), `logcat_failed` (logcat
@@ -57,7 +62,10 @@ Errors:
   text decoded from its last 2000 bytes), `device_lost` (the connection closed
   before logcat reported its exit status; no entries are returned),
   `device_not_found`, `device_offline`, `device_unauthorized` or
-  `adb_server_unavailable`.
+  `adb_server_unavailable`. With a `Package` term, `device_command_failed`
+  when the package list failed: a non-zero exit status, none at all, no
+  usable output, or a command that took more than 5 seconds (see
+  [errors.md](errors.md#device_command_failed)).
 - `TimeoutError` when the device sends no byte for 30 seconds once logcat
   runs. There is no limit on the whole dump.
 
@@ -84,8 +92,7 @@ only on `logprobe.stream`:
 | --- | --- | --- |
 | `devices` | required | `Device` objects or serial strings; at least one, no serial twice. |
 | `where` | `None` | A condition; only entries that match it are delivered. |
-| `level`, `tag`, `message`, `pid` | `None` | Shortcuts, combined with `where` by AND. See [conditions.md](conditions.md). |
-| `package` | `None` | Not implemented yet: raises `NotImplementedError`. |
+| `level`, `tag`, `message`, `package`, `pid` | `None` | Shortcuts, combined with `where` by AND. See [conditions.md](conditions.md). |
 | `since` | `None` | `None` starts with the backlog the device still holds; `"now"` skips it. |
 | `on_entry` | `None` | A callback for every entry, called on a consumer thread (blocking API only). |
 | `reconnect` | `60.0` | Reconnect budget in seconds, per device. See [Reconnect and resume](#reconnect-and-resume). |
@@ -99,14 +106,14 @@ creating the stream contacts the adb server (and may start it) and may raise
 pass `Device` objects.
 
 Wrong arguments fail when the stream is created: `TypeError` for a wrong type
-(a bool is not a number), `ValueError` for a value out of range, an empty
-`devices`, a malformed serial string or a repeated serial, and
-`NotImplementedError` for a condition that contains `Package` or for the
-`package=` shortcut.
+(a bool is not a number), and `ValueError` for a value out of range, an empty
+`devices`, a malformed serial string or a repeated serial.
 
 `start()` runs on the calling thread. It checks each device in turn (the device
 must support the `shell_v2` feature, otherwise `adb_error`; with `detect_skips`
-it also reads the device's API level), opens one logcat
+it also reads the device's API level; with a condition on the app it takes the
+device's package list, see
+[Filter by app](#filter-by-app-extra-commands-and-messages)), opens one logcat
 connection per device, and then starts one reader thread per device, plus a
 consumer thread when `on_entry` is given. When a step fails, everything that
 was opened is closed and the `LogprobeError` is raised. A stream is used once:
@@ -391,6 +398,62 @@ marker does not come back within 10 seconds of connecting. Its `details` has
 `serial`, `command`, `exit_status` and `stderr`. A device or adb server that
 cannot be reached raises its own code instead (see [errors.md](errors.md)).
 
+## Filter by app: extra commands and messages
+
+With a `Package` term or the `package=` shortcut, a stream finds the app of
+each line from its uid and the device's list of installed packages. How the
+verdict is reached, and which lines are counted as `unattributed`, is in
+[conditions.md](conditions.md#package). This section lists what the stream
+runs on each device and what it logs.
+
+`start()` runs these commands on each device, after the API level check and
+before the start marker of `since="now"`:
+
+- `date +%s`, with `since=None`, to tell the backlog from new lines. When it
+  fails or takes more than 5 seconds, an INFO says so and the stream goes on
+  without that clock.
+- One package list: `pm list packages -U`, or `dumpsys package packages` when
+  `pm` prints that it does not know `-U` or prints no usable list. The list
+  has 5 seconds in all. When it fails (a non-zero exit status, none at all, no
+  usable output, or no time left), the stream starts anyway, and the device has
+  no list for 30 seconds: every line of an app id from 10000 to 19999 whose
+  verdict depends on its app is counted as `unattributed` then, also one
+  logged before the clock read by `date +%s`.
+
+An adb error in either command fails `start()`.
+
+While reading, the stream takes the list again:
+
+- every 30 seconds, in the background: on a short-lived helper thread
+  `logprobe-list-<serial>` in the blocking stream, on a task of that name in
+  the asyncio stream. It has 5 seconds, and the reader goes on reading
+  meanwhile. `stop()`, `kill()` and `stop(flush=...)` return without waiting
+  for it, but a line before the flush marker that needs a list makes the
+  reader wait for it within the flush budget; when the budget runs out first,
+  the flush ends `timed_out`. `join()` of the blocking stream waits for the
+  helper thread, which checks every 0.25 seconds of blocking I/O whether the
+  reader ended and may take longer while it parses the output; use
+  `join(timeout=...)` for a deadline.
+- for a read with a line that needs a list, at most once in 0.5 seconds.
+  Reading that device pauses for at most 2 seconds.
+
+A list that fails while reading, an adb error included, does not end the
+stream, and the device gets no new list for 30 seconds: the last list that
+succeeded still decides the app ids it names, and the lines it cannot decide
+are counted as `unattributed`.
+
+The stream logs these messages per device, through the `logprobe` loggers:
+
+| Level | When |
+| --- | --- |
+| WARNING | The first list of the device that failed (once): the command and what went wrong. |
+| WARNING | The first line of the device that had to be judged without knowing its app (once), with the cause. |
+| WARNING | A watched package runs under a system uid, so every process of that uid is taken as its own (once per package). |
+| WARNING | A list shows that a watched package has a new uid or is no longer installed, and lines judged with its old uid since the last list are counted (an INFO when there are none). |
+| WARNING | A watched package appeared under a uid whose lines were judged before it was known; the message gives the count. |
+| INFO | After the first list that succeeded: a watched package that is not installed (once per package). |
+| INFO | The device clock could not be read. |
+
 ## Check the summary
 
 `stream.summary` is a `StreamSummary` with one `DeviceSummary` per device in
@@ -408,7 +471,7 @@ exact.
 | `truncated` | Lines cut short at the line length limit (64 KiB). |
 | `gaps`, `lost` | Gaps reported, and the total of the known lost-line counts. |
 | `reconnects` | Connections made after the first. |
-| `unattributed` | Lines whose app could not be determined; always 0 for now. |
+| `unattributed` | With a condition on the app, lines whose app could not be determined, plus lines that may have been judged with an outdated package list (see [conditions.md](conditions.md#package)); 0 without one. |
 | `flush` | How the flush ended (see above). |
 | `error` | The error that ended this device, or `None`. |
 
@@ -579,7 +642,8 @@ lines a second, each cut to 1,024 bytes).
 
 ## Limits
 
-- `Package` conditions and the `package=` shortcut are not implemented yet and
-  raise `NotImplementedError` when the stream is created.
+- While a stream takes a package list at the start or for a read, it does not
+  read that device. An older logd may skip lines then, and `detect_skips` does
+  not see it.
 - The threading rules of the blocking stream are verified on CPython with the
   global interpreter lock. The free-threaded build is not verified.
