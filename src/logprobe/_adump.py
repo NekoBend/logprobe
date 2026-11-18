@@ -72,20 +72,23 @@ async def arun_dump(
         job = await _take_list(address, serial)
         keep = _dump.package_filter(serial, condition, job)
     collector = _dump.Collector(serial, condition, keep)
-    async with await _open(address, serial, argv) as stream:
-        stream.set_timeout(_dump.IDLE_TIMEOUT)
-        while True:
-            batch = await _astream.gather(stream, None)
-            for data in batch.err:
-                collector.take("stderr", data)
-            if batch.out:
-                collector.take("stdout", b"".join(batch.out))
-            if batch.broken is not None:
-                raise batch.broken
-            if batch.ended:
-                break
-            if not batch:
-                raise _dump.idle_timeout()
-            await asyncio.sleep(0)
-        status = stream.exit_status
-    return collector.finish(status)
+    try:
+        async with await _open(address, serial, argv) as stream:
+            stream.set_timeout(_dump.IDLE_TIMEOUT)
+            while True:
+                batch = await _astream.gather(stream, None)
+                for data in batch.err:
+                    collector.take("stderr", data)
+                if batch.out:
+                    collector.take("stdout", b"".join(batch.out))
+                if batch.broken is not None:
+                    raise batch.broken
+                if batch.ended:
+                    break
+                if not batch:
+                    raise _dump.idle_timeout()
+                await asyncio.sleep(0)
+            status = stream.exit_status
+        return collector.finish(status)
+    finally:
+        collector.tell_later_gaps()  # also when the dump failed or was cancelled

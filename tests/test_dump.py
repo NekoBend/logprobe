@@ -713,17 +713,52 @@ def test_anr_with_package_is_allowed(
     assert programs(fake) == ["logcat"]  # no package list
 
 
-def test_a_chatty_notice_is_an_entry_of_a_dump_and_makes_no_gap(
-    fake: FakeAdbServer, device: Device, dump: Dump
+def gap_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if r.name.startswith("logprobe") and "gap" in r.getMessage()
+    ]
+
+
+def test_a_chatty_notice_is_an_entry_of_a_dump_and_its_gap_is_logged(
+    fake: FakeAdbServer, device: Device, dump: Dump, caplog: pytest.LogCaptureFixture
+) -> None:
+    from tests.device_facts import level_dir, load
+
+    notices = load(level_dir(24), "C06")["facts"]["notice_details"]
+    recorded = [each["line"] for each in notices[:3]]
+    script(fake, ("stdout", text(line(0, "a"), *recorded, line(9, "b"))))
+    with caplog.at_level("WARNING", logger="logprobe"):
+        entries = dump(device)
+    assert [type(each) for each in entries] == [LogEntry] * 5
+    assert [each.tag for each in entries] == ["tag", *["chatty"] * 3, "tag"]
+    warnings = gap_warnings(caplog)
+    assert len(warnings) == 2
+    assert warnings[0].startswith(f"{SERIAL}: a gap in the log (device_reported)")
+    assert warnings[1] == (
+        f"{SERIAL}: 2 more gaps in the log after the first of each kind "
+        "(device_reported 2)"
+    )
+
+
+def test_a_failed_dump_still_logs_the_count_of_its_later_gaps(
+    fake: FakeAdbServer, device: Device, dump: Dump, caplog: pytest.LogCaptureFixture
 ) -> None:
     from tests.device_facts import level_dir, load
 
     notices = load(level_dir(24), "C06")["facts"]["notice_details"]
     recorded = [each["line"] for each in notices[:2]]
-    script(fake, ("stdout", text(line(0, "a"), *recorded, line(9, "b"))))
-    entries = dump(device)
-    assert [type(each) for each in entries] == [LogEntry] * 4
-    assert [each.tag for each in entries] == ["tag", "chatty", "chatty", "tag"]
+    script(fake, ("stdout", text(*recorded)), exit_status=3)
+    with (
+        caplog.at_level("WARNING", logger="logprobe"),
+        pytest.raises(LogprobeError, match="status 3"),
+    ):
+        dump(device)
+    assert gap_warnings(caplog)[1:] == [
+        f"{SERIAL}: 1 more gaps in the log after the first of each kind "
+        "(device_reported 1)"
+    ]
 
 
 # --- asyncio only ---------------------------------------------------------------

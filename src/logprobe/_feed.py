@@ -125,6 +125,7 @@ knows the apps decides.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import secrets
@@ -526,20 +527,23 @@ class Feeder:
         """Log, in one WARNING, how many gaps came after the first of each reason.
 
         Called when the device's read ends; nothing is logged when there were
-        none. The counts start again from zero.
+        none. The counts start again from zero before the message is logged,
+        and a logging handler that raises does not stop the caller (the read
+        is ending; the message is only lost).
         """
         later = self._gaps_later
-        counts = [f"{reason} {n}" for reason, n in sorted(later.items()) if n]
+        counts = {reason: n for reason, n in sorted(later.items()) if n}
         if not counts:
             return
-        _LOG.warning(
-            "%s: %d more gaps in the log after the first of each kind (%s)",
-            self.serial,
-            sum(later.values()),
-            ", ".join(counts),
-        )
         for reason in later:
             later[reason] = 0
+        with contextlib.suppress(Exception):
+            _LOG.warning(
+                "%s: %d more gaps in the log after the first of each kind (%s)",
+                self.serial,
+                sum(counts.values()),
+                ", ".join(f"{reason} {n}" for reason, n in counts.items()),
+            )
 
     def _process(self, framed: list[FramedLine], nbytes: int) -> list[Chunk]:  # noqa: PLR0912, PLR0915  (one flat loop: the per-line hot path)
         if not framed:

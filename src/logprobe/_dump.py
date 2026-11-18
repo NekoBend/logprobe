@@ -177,8 +177,11 @@ class Collector:
                 },
             )
         self._collect(self._feeder.finish())
-        self._feeder.tell_later_gaps()
         return self._entries
+
+    def tell_later_gaps(self) -> None:
+        """Log the count of the gaps after the first of each reason (see `Feeder`)."""
+        self._feeder.tell_later_gaps()
 
     def _collect(self, chunks: list[Chunk]) -> None:
         keep = self._keep
@@ -217,6 +220,8 @@ def run_dump(
             while (event := stream.read(_never)) is not None:
                 collector.take(*event)
             status = stream.exit_status
+        return collector.finish(status)
     except TimeoutError:
         raise idle_timeout() from None
-    return collector.finish(status)
+    finally:
+        collector.tell_later_gaps()  # also when the dump failed or was interrupted

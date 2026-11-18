@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import statistics
 import time
 from datetime import UTC, datetime, timedelta
@@ -980,3 +981,49 @@ class TestGapLogging:
             feeder.feed(data(line(0, "a"), notice(5)))
             feeder.tell_later_gaps()
         assert len(caplog.records) == 1  # the first gap only
+
+    def test_each_reason_warns_once_and_the_end_line_counts_by_reason(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        feeder = Feeder("s1")
+        now = datetime.now(UTC)
+        gaps = [
+            Gap("s1", reason, "disconnected", now, None)
+            for reason in ("ring_rotated", "continuity_unknown", "ring_rotated")
+        ]
+        with caplog.at_level("WARNING", logger="logprobe"):
+            for gap in gaps:
+                feeder._count_gap(gap)
+            feeder.feed(data(notice(5)))
+            feeder.tell_later_gaps()
+        messages = [r.getMessage() for r in caplog.records]
+        assert [m.split(":")[1].strip() for m in messages[:3]] == [
+            "a gap in the log (ring_rotated)",
+            "a gap in the log (continuity_unknown)",
+            "a gap in the log (device_reported)",
+        ]
+        assert "after a reconnect (disconnected)" in messages[0]
+        assert messages[3:] == [
+            "s1: 1 more gaps in the log after the first of each kind (ring_rotated 1)"
+        ]
+
+    def test_a_raising_handler_does_not_stop_the_end_of_a_read(self) -> None:
+        feeder = Feeder("s1")
+        feeder.feed(data(notice(5), notice(2)))
+
+        class Raising(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                raise RuntimeError(record.getMessage())
+
+            def handle(self, record: logging.LogRecord) -> bool:
+                self.emit(record)
+                return True
+
+        log = logging.getLogger("logprobe")
+        handler = Raising()
+        log.addHandler(handler)
+        try:
+            feeder.tell_later_gaps()  # no exception
+        finally:
+            log.removeHandler(handler)
+        assert feeder.gaps == 2
