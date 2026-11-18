@@ -1893,8 +1893,9 @@ def stream(
             connection itself once it has waited a whole second for room in
             the queue since it last read from the device, waits until the
             queue is at most half full (in lines and in bytes), and connects
-            again as after any other disconnect; lines the device no longer
-            has are then reported as a gap with the cause ``stalled``. That
+            again as after any other disconnect; a gap with the cause
+            ``stalled`` is reported when the replay check finds lines missing
+            or cannot verify that the new connection continues the old one. That
             wait counts as waiting for room, so it does not use up the budget
             of ``stop(flush=)``. Other API levels cut a slow reader off
             themselves, which the stream always detects, so the flag is

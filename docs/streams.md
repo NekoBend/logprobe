@@ -331,7 +331,7 @@ device was not found, offline or unauthorized, and `adb_error` for anything
 else (for example a timeout or a broken connection).
 
 - `reconnect=math.inf` never runs out of budget. A first connection that
-  fails before any standard output (the fourth row of the table), a late start
+  fails before any standard output (see the table), a late start
   marker or a broken shell protocol still end the stream.
 - `reconnect=0` does not recover a lost connection, an ended logcat or a failed
   logcat. Connections that logd cut off are still resumed, and three in a row
