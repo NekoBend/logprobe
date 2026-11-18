@@ -21,12 +21,12 @@ from collections import deque
 from time import monotonic
 from typing import TYPE_CHECKING, Literal, overload
 
-from ._outbox import TICK, _Ledger, _measure
+from ._outbox import STALLED, TICK, _Ledger, _measure, _Turn
 
 if TYPE_CHECKING:
     from collections.abc import Hashable
 
-    from ._outbox import Chunk
+    from ._outbox import Chunk, _Stalled
 
 __all__ = ["AsyncOutbox"]
 
@@ -94,6 +94,7 @@ class AsyncOutbox(_Ledger):
         producer: Hashable | None = None,
         *,
         interruptible: Literal[False] = False,
+        limit: None = None,
     ) -> float: ...
 
     @overload
@@ -104,7 +105,30 @@ class AsyncOutbox(_Ledger):
         producer: Hashable | None = None,
         *,
         interruptible: bool,
+        limit: None = None,
     ) -> float | None: ...
+
+    @overload
+    async def put(
+        self,
+        segments: Chunk,
+        charge: int,
+        producer: Hashable | None = None,
+        *,
+        interruptible: Literal[False] = False,
+        limit: float | None,
+    ) -> float | _Stalled: ...
+
+    @overload
+    async def put(
+        self,
+        segments: Chunk,
+        charge: int,
+        producer: Hashable | None = None,
+        *,
+        interruptible: bool,
+        limit: float | None,
+    ) -> float | _Stalled | None: ...
 
     async def put(
         self,
@@ -113,7 +137,8 @@ class AsyncOutbox(_Ledger):
         producer: Hashable | None = None,
         *,
         interruptible: bool = False,
-    ) -> float | None:
+        limit: float | None = None,
+    ) -> float | _Stalled | None:
         """Queue one chunk, waiting while the queue is at a cap.
 
         The arguments and the result are those of `Outbox.put`. A task that is
@@ -126,14 +151,14 @@ class AsyncOutbox(_Ledger):
             return 0.0
         waited = 0.0
         if self._waiters or not (self._stopping or self._has_room()):
-            waited, interrupted = await self._wait_turn(
-                producer, interruptible=interruptible
+            waited, turn = await self._wait_turn(
+                producer, interruptible=interruptible, limit=limit
             )
             if self._killed:
                 self._drop()
                 return waited
-            if interrupted:
-                return None
+            if turn is not _Turn.ADMITTED:
+                return STALLED if turn is _Turn.STALLED else None
         self._admit(segments, lines, charge)
         self._ready.wake(1)
         return waited
@@ -158,7 +183,7 @@ class AsyncOutbox(_Ledger):
                     return None
             await self._ready.wait(step)
         segments = self._release()
-        if self._waiters:
+        if self._waiters or self._draining:
             self._space.wake()
         return segments
 
@@ -166,19 +191,43 @@ class AsyncOutbox(_Ledger):
         """Drop everything queued and wake the waiting producers."""
         self._drop()
 
+    async def wait_half_empty(self, producer: Hashable) -> bool:
+        """Wait until both counts are at most half their caps.
+
+        The rules and the result are those of `Outbox.wait_half_empty`. A task
+        that is cancelled while it waits leaves no wait in progress behind.
+        """
+        key = self._enter_drain(producer)
+        try:
+            while not self._stopping and not self._half_empty():
+                await self._space.wait(self._tick)
+        finally:
+            self._leave_drain(key)
+        return not self._stopping
+
     async def _wait_turn(
-        self, producer: Hashable | None, *, interruptible: bool
-    ) -> tuple[float, bool]:
-        """Wait until this producer is first in line with room (see `Outbox`)."""
+        self, producer: Hashable | None, *, interruptible: bool, limit: float | None
+    ) -> tuple[float, _Turn]:
+        """Wait until this producer is first in line with room (see `Outbox`).
+
+        The limit is measured with ``perf_counter``, not with the loop's timer,
+        which can fire up to one tick of the loop's clock early.
+        """
         ticket, start = self._enter_line(producer)
-        interrupted = False
+        deadline = None if limit is None else start + limit
+        turn = _Turn.ADMITTED
         try:
             while not self._killed and not self._admissible(ticket):
                 if interruptible and self._interrupted:
-                    interrupted = True
+                    turn = _Turn.INTERRUPTED
                     break
-                await self._space.wait(self._tick)
+                # A stop admits every producer in turn, so the limit no longer applies.
+                step = self._slice(None if self._stopping else deadline)
+                if step is None:
+                    turn = _Turn.STALLED
+                    break
+                await self._space.wait(step)
         finally:
             waited = self._leave_line(ticket, producer, start)
             self._wake_producers()  # the next in line may be admissible now
-        return waited, interrupted
+        return waited, turn

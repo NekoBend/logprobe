@@ -16,12 +16,22 @@ seconds is counted from the first failure after the last stable connection; a
 connection that delivered output for `STABLE_AFTER` seconds is stable and
 resets both the delay and the budget. A connection that logd cut off
 (`EndKind.RELEASED`) or that the reader closed because its queue stayed full
-(`EndKind.STALLED`) is resumed at once and is no failure, unless `QUICK_LIMIT`
-connections in a row ended that way within `QUICK_END` seconds of opening; the
-count is by connection length, so lines logd writes about the connection itself
-never reset it. With ``reconnect=0`` nothing is recovered after a lost
-connection, an ended logcat or a failed logcat, while cut-off and stalled
-connections are still resumed.
+(`EndKind.STALLED`) is resumed without a delay (a reader that closed its
+connection first waits until its queue is half empty) and is no failure, unless
+`QUICK_LIMIT` connections in a row ended that way within `QUICK_END` seconds of
+opening; the count is by connection length, so lines logd writes about the
+connection itself never reset it. With ``reconnect=0`` nothing is recovered
+after a lost connection, an ended logcat or a failed logcat, while cut-off and
+stalled connections are still resumed.
+
+Older logd versions
+-------------------
+
+`skips_silently` tells from the API level whether the device's logd skips lines
+of a reader that does not keep up, without any notice, instead of cutting it
+off. With ``detect_skips`` such a reader closes its connection itself once it
+has waited `STALL_AFTER` seconds for room in its queue since it last received
+from the device (`stall_limit`), and resumes as from any other disconnect.
 
 Resuming without losing or repeating lines
 ------------------------------------------
@@ -72,7 +82,9 @@ not report:
   in the overlap. Deletions in the middle of a ring (logd pruning chatty
   sources, another tool running ``logcat -c``) that remove only unread lines are
   missed the same way.
-- Lines that an older logd skipped without a notice while the reader was slow.
+- Lines that an older logd skipped without a notice while the reader was slow:
+  all of them without ``detect_skips``; with it, those skipped before the
+  reader had waited `STALL_AFTER` seconds for room in its queue.
 - Lines that do not parse: they are neither matched nor checked. A replayed one
   is delivered twice without a gap, and one that does not come back goes
   unnoticed.
@@ -116,6 +128,7 @@ __all__ = [
     "QUICK_LIMIT",
     "RESUME_IDLE",
     "STABLE_AFTER",
+    "STALL_AFTER",
     "Decision",
     "EndKind",
     "ErrorCode",
@@ -128,7 +141,10 @@ __all__ = [
     "cause_of",
     "classify_end",
     "end_error",
+    "parse_sdk",
     "plan_resume",
+    "skips_silently",
+    "stall_limit",
     "t_arg",
 ]
 
@@ -142,9 +158,14 @@ QUICK_END: Final = 1.0
 QUICK_LIMIT: Final = 3
 #: Seconds without data on a new connection after which the resume check ends.
 RESUME_IDLE: Final = 1.0
+#: Seconds a reader may wait for room in the queue, since it last received from
+#: the device, before it closes the connection itself; only where logd skips
+#: lines of a slow reader.
+STALL_AFTER: Final = 1.0
 
 _EOF_TEXT: Final = "unexpected eof"
 _SIGNAL_EXIT: Final = 128
+_SDK_DIGITS: Final = 4  # an API level has fewer digits for a long time to come
 _EPOCH: Final = datetime(1970, 1, 1, tzinfo=UTC)
 
 type ErrorCode = Literal[
@@ -188,14 +209,15 @@ def classify_end(
         stderr_tail: The last lines the command wrote to stderr.
         stop_requested: The reader was asked to stop.
         stalled: The reader closed the connection itself because its queue
-            stayed full.
+            stayed full. When the exit packet had arrived before that close,
+            its exit status names the end instead: logcat had ended on its own.
         output_seen: The connection delivered at least one line of output.
         first_connection: This was the first connection of the stream.
     """
-    if stop_requested or stalled:
-        return EndKind.STOPPED if stop_requested else EndKind.STALLED
+    if stop_requested:
+        return EndKind.STOPPED
     if exit_status is None:
-        return EndKind.LOST
+        return EndKind.STALLED if stalled else EndKind.LOST
     if exit_status == 1 and _EOF_TEXT in stderr_tail.lower():
         return EndKind.RELEASED
     if exit_status == 0 or exit_status >= _SIGNAL_EXIT:
@@ -221,6 +243,37 @@ def cause_of(kind: EndKind) -> GapCause:
         case _:
             msg = f"a connection that ended as {kind.name} is not resumed"
             raise ValueError(msg)
+
+
+def parse_sdk(stdout: bytes) -> int | None:
+    """The API level from the output of ``getprop ro.build.version.sdk``, or None.
+
+    Only ASCII decimal digits, with white space around them, are a level, and
+    at most `_SDK_DIGITS` of them: a longer number is no API level, and
+    ``int`` refuses a very long one.
+    """
+    text = stdout.strip()
+    # bytes.isdigit accepts ASCII digits only
+    if not text.isdigit() or len(text) > _SDK_DIGITS:
+        return None
+    return int(text)
+
+
+def skips_silently(sdk: int | None) -> bool:
+    """True when logd at API level ``sdk`` may skip lines of a slow reader unnoticed.
+
+    Measured: levels 24 and 30 skip lines of a reader that does not keep up
+    and leave the connection open; levels 26, 28, 29, 31, 32 and 36 cut such a
+    reader off, which a stream always notices. The levels in between follow
+    their neighbours: 25 and below skip, 27 and 33 and above cut off. A level
+    that could not be read (None) is treated as one that skips.
+    """
+    return sdk is None or sdk <= 25 or sdk == 30
+
+
+def stall_limit(sdk: int | None) -> float | None:
+    """Seconds a reader of a device at ``sdk`` may wait for room; None: no limit."""
+    return STALL_AFTER if skips_silently(sdk) else None
 
 
 def attempt_error_code(error: BaseException) -> ErrorCode:

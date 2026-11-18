@@ -300,6 +300,10 @@ and never truncates.
 - Always present: `schema` (`"logprobe.entry/1"`), `logged_at`, `level`,
   `tag`, `message`, `pid`, `tid`, `parsed` and `truncated`, even when they
   are `0` or `False`.
+- The number after the slash in `schema` changes only when a change breaks
+  readers (a key removed or renamed, or a type or meaning changed), also
+  during the alpha. Adding keys does not change it, so readers should ignore
+  keys they do not know.
 - Present only when not `None`: `serial`, `uid`, `uid_raw` and `package`.
 - `raw` is left out. For an unparsed line, `message` already holds the
   whole line.

@@ -86,7 +86,7 @@ from ._device import Device
 from ._errors import LogprobeError
 from ._feed import Feeder, new_marker
 from ._marks import Act, FlushRequest, Marks, Phase, Step
-from ._outbox import Outbox, _Ledger
+from ._outbox import STALLED, Outbox, _Ledger
 from ._records import DeviceSummary, Gap, StreamSummary
 from ._resume import (
     Decision,
@@ -99,7 +99,10 @@ from ._resume import (
     cause_of,
     classify_end,
     end_error,
+    parse_sdk,
     plan_resume,
+    skips_silently,
+    stall_limit,
 )
 
 if TYPE_CHECKING:
@@ -119,6 +122,7 @@ _MIN_BUFFER_BYTES = 65536
 _STDERR_LINES = 20
 _STDERR_LINE_BYTES = 1024
 _STDERR_LOG_RATE = 10  # lines per second
+_SDK_COMMAND = ("getprop", "ro.build.version.sdk")
 _LOG = logging.getLogger(__name__)
 
 __all__ = ["LogStream", "stream"]
@@ -151,6 +155,7 @@ class _Unit:
         "marks",
         "reconnect",
         "serial",
+        "stall_after",
         "started_at",
         "t_arg",
         "thread",
@@ -175,6 +180,9 @@ class _Unit:
         # read of ``since="now"``, and is used again when a reconnect has no
         # line to resume from.
         self.t_arg: str | None = None
+        # Seconds the reader may wait for room before it closes its connection
+        # itself (``detect_skips`` on an older logd); None: as long as it takes.
+        self.stall_after: float | None = None
 
     def summary(self) -> DeviceSummary:
         feeder = self.feeder
@@ -346,14 +354,26 @@ def _receive(sock: socket.socket) -> bytes | None:
 class _RunBase:
     """What one connection of a device knows, whatever it is read with."""
 
-    __slots__ = ("check", "exit_status", "opened_at", "output_since", "tail")
+    __slots__ = (
+        "check",
+        "exit_status",
+        "opened_at",
+        "opened_perf",
+        "output_since",
+        "stalled",
+        "tail",
+    )
 
     def __init__(self, serial: str, check: ResumeCheck | None) -> None:
         self.tail = _StderrTail(serial)
         self.check = check
         self.opened_at = monotonic()
+        # The same moment on the fine clock that times the waits for room.
+        self.opened_perf = perf_counter()
         self.output_since: float | None = None  # when the first stdout arrived
         self.exit_status: int | None = None
+        # The reader closed the connection because it waited too long for room.
+        self.stalled = False
 
     def pending(self) -> ResumeCheck | None:
         """The resume check while it has not finished, else None."""
@@ -373,6 +393,11 @@ class _Run(_RunBase):
         self.conn = conn
         self.decoder = ShellV2Decoder()
 
+    def stall(self) -> None:
+        """Close the connection: the reader waited too long for room."""
+        self.stalled = True
+        self.conn.close()
+
 
 def _routed(unit: _Unit, chunks: list[Chunk]) -> Iterator[tuple[list[Segment], int]]:
     """The segments of each chunk that the device's markers let through, and its charge.
@@ -383,6 +408,18 @@ def _routed(unit: _Unit, chunks: list[Chunk]) -> Iterator[tuple[list[Segment], i
         segments = unit.marks.route(chunk.segments)
         if segments:
             yield segments, chunk.charge
+
+
+def _queue_read(core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk]) -> None:
+    """Queue what one read yielded; a device with a stall limit by `_enqueue_limited`.
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    if unit.stall_after is None:
+        _enqueue(core, unit, chunks)
+    else:
+        _enqueue_limited(core, unit, run, chunks)
 
 
 def _enqueue(core: _Core, unit: _Unit, chunks: list[Chunk]) -> None:
@@ -402,6 +439,38 @@ def _enqueue(core: _Core, unit: _Unit, chunks: list[Chunk]) -> None:
         if waited is None:
             _marking(core, unit)
             outbox.put(segments, charge, unit.serial)
+
+
+def _enqueue_limited(core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk]) -> None:
+    """`_enqueue` for a device whose logd may skip the lines of a slow reader.
+
+    The puts of one read may wait ``unit.stall_after`` seconds for room in all
+    (a flush request is handled as in `_enqueue`; the marker command does not
+    count). When that time is used up, the reader closes the connection, so
+    that logd no longer holds lines back for it, and then queues the chunk and
+    the rest of the read, however long that takes: the feeder has counted
+    their lines and remembers them for the resume.
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    outbox = core.outbox
+    serial = unit.serial
+    left = unit.stall_after
+    for segments, charge in _routed(unit, chunks):
+        began = perf_counter()
+        waited = outbox.put(segments, charge, serial, interruptible=True, limit=left)
+        if waited is None:
+            if left is not None:
+                left -= perf_counter() - began
+            _marking(core, unit)
+            waited = outbox.put(segments, charge, serial, limit=left)
+        if waited is STALLED:
+            run.stall()
+            left = None
+            outbox.put(segments, charge, serial)
+        elif left is not None:
+            left -= waited
 
 
 def _feed_output(
@@ -428,7 +497,7 @@ def _decode(
     pieces, status, broken = run.decoder.feed_pieces(data)
     err = b"".join(p for kind, p, _ in pieces if kind == "stderr")
     out = b"".join(p for kind, p, _ in pieces if kind == "stdout")
-    _enqueue(core, unit, _feed_output(unit, run, err, out))
+    _queue_read(core, unit, run, _feed_output(unit, run, err, out))
     return status, broken
 
 
@@ -439,7 +508,8 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
     the flags, decode the shell protocol, feed the stdout bytes to the feeder
     and queue what it returns. While a resume check is pending, every receive
     wait that brings no data counts toward its idle time (a wait on a full
-    queue does not).
+    queue does not). Reading also ends once the reader closed the connection
+    because it waited too long for room (``run.stalled``).
 
     Raises:
         LogprobeError: The shell protocol broke (the output before it was
@@ -476,7 +546,7 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
             return
         if broken is not None:  # the output before it was queued already
             raise broken
-        if outbox.stopping:
+        if outbox.stopping or run.stalled:
             return
 
 
@@ -496,8 +566,8 @@ def _quiet(core: _Core, unit: _Unit, run: _Run, waited: float) -> bool:
     if outbox.stopping:
         return True
     if _idle_ended(run, waited):
-        _enqueue(core, unit, unit.feeder.end_check())
-        return outbox.stopping
+        _queue_read(core, unit, run, unit.feeder.end_check())
+        return outbox.stopping or run.stalled
     return False
 
 
@@ -673,9 +743,65 @@ def _prepare_since(core: _Core, unit: _Unit) -> None:
     _one_shot(core, unit, _begin_start_marker(unit, clock))
 
 
-def _prepare(core: _Core, unit: _Unit, *, since: bool) -> None:
+def _judge_logd(unit: _Unit, result: ShellResult | None) -> None:
+    """Set the device's stall limit from the result of ``getprop ro.build.version.sdk``.
+
+    ``result`` is None when the command took longer than its limit. A level that
+    cannot be read counts as an older logd, and a WARNING says why. A newer
+    logd cuts slow readers off itself and needs no limit: an INFO says that
+    ``detect_skips`` is ignored there.
+    """
+    sdk: int | None = None
+    if result is None:
+        reason = "timed out"
+    elif result.exit_status is None:
+        reason = "no exit status"
+    elif result.exit_status != 0:
+        reason = f"exit status {result.exit_status}"
+    else:
+        sdk = parse_sdk(result.stdout)
+        shown = result.stdout[:80].decode("utf-8", "replace").strip()
+        reason = f"printed {shown!r}"
+    if sdk is None:
+        _LOG.warning(
+            "could not read the API level of %s (%s); detect_skips treats its "
+            "logd as one that skips lines silently",
+            unit.serial,
+            reason,
+        )
+    elif not skips_silently(sdk):
+        _LOG.info(
+            "logd on %s (API level %d) cuts slow readers off itself; "
+            "detect_skips is not needed there and is ignored",
+            unit.serial,
+            sdk,
+        )
+    unit.stall_after = stall_limit(sdk)
+
+
+def _check_logd(core: _Core, unit: _Unit) -> None:
+    """Read the device's API level, for ``detect_skips``, and set its stall limit.
+
+    A command that fails or takes too long leaves the level unread; an error of
+    the adb server or the device fails the start, as in the other start steps.
+
+    Raises:
+        LogprobeError: The device or the adb server failed.
+    """
+    try:
+        result = unit.device._run_command(
+            _SDK_COMMAND, _marks.COMMAND_LIMIT, core.cancelled
+        )
+    except TimeoutError:
+        result = None
+    _judge_logd(unit, result)
+
+
+def _prepare(core: _Core, unit: _Unit, *, since: bool, detect_skips: bool) -> None:
     """Step one of the start for one device: the checks and the start marker."""
     unit.device._require_shell_v2(core.cancelled)
+    if detect_skips:
+        _check_logd(core, unit)
     if since:
         _prepare_since(core, unit)
 
@@ -828,6 +954,22 @@ class _Attempt(NamedTuple):
     deadline: float | None
 
 
+def _ended_at(run: _RunBase) -> float:
+    """When ``run`` ended, on the ``monotonic`` clock its ``opened_at`` uses.
+
+    A stalled connection is at least as old as the waits for room that ended it.
+    Those are timed with ``perf_counter``, while ``monotonic`` can advance in
+    steps of about 16 ms on some platforms, so its age is taken from
+    ``perf_counter``: a stall then never looks shorter than its waits, and with
+    `_resume.STALL_AFTER` not below `_resume.QUICK_END` it never counts as a
+    quick end.
+    """
+    now = monotonic()
+    if not run.stalled:
+        return now
+    return max(now, run.opened_at + (perf_counter() - run.opened_perf))
+
+
 def _connection_ended(
     core: _CoreBase[Any],
     unit: _Unit,
@@ -849,24 +991,32 @@ def _connection_ended(
         run.exit_status,
         stderr,
         stop_requested=outbox.stopping,
-        stalled=False,
+        stalled=run.stalled,
         output_seen=run.output_since is not None,
         first_connection=first,
     )
     decision = policy.connection_ended(
         kind,
         opened_at=run.opened_at,
-        ended_at=monotonic(),
+        ended_at=_ended_at(run),
         output_since=run.output_since,
     )
     if not decision.retry:
         return _final_error(decision, unit, run)
-    _LOG.warning(
-        "the logcat connection to %s ended (%s); reconnecting in %g s",
-        unit.serial,
-        kind.value,
-        decision.delay,
-    )
+    if kind is EndKind.STALLED:
+        _LOG.warning(
+            "the reader of %s closed its logcat connection after waiting %g s "
+            "for room in the queue; it reconnects once the queue is half empty",
+            unit.serial,
+            unit.stall_after,
+        )
+    else:
+        _LOG.warning(
+            "the logcat connection to %s ended (%s); reconnecting in %g s",
+            unit.serial,
+            kind.value,
+            decision.delay,
+        )
     pending = run.pending()
     return _Retry(decision, kind, None if pending is None else pending.flags)
 
@@ -936,6 +1086,8 @@ def _serve(core: _Core, unit: _Unit) -> LogprobeError | None:
     or to reconnect (the decisions are in ``_resume`` and ``_marks``; this
     function measures times, waits, opens connections and acts on the answers).
     A device whose flush ended is finished, whatever state its connection is in.
+    A reader that closed its connection because it waited too long for room
+    connects again once the queue is half empty.
     """
     policy = ReconnectPolicy(unit.reconnect)
     conn = unit.conn
@@ -951,6 +1103,10 @@ def _serve(core: _Core, unit: _Unit) -> LogprobeError | None:
         ended = _connection_ended(core, unit, run, policy, first=first)
         if not isinstance(ended, _Retry):
             return ended
+        if ended.kind is EndKind.STALLED and not core.outbox.wait_half_empty(
+            unit.serial
+        ):
+            return None
         decision = ended.decision
         while True:
             if not _pause(core, unit, decision.delay):
@@ -1170,11 +1326,14 @@ class LogStream:
         buffer_lines: int,
         buffer_bytes: int,
         since: Literal["now"] | None = None,
+        *,
+        detect_skips: bool = False,
     ) -> None:
         units = [_Unit(device, condition, reconnect) for device in devices]
         self._core = _Core(units, Outbox(buffer_lines, buffer_bytes))
         self._on_entry = on_entry
         self._since = since
+        self._detect_skips = detect_skips
         self._phase = _Phase.NEW
         self.serials: tuple[str, ...] = tuple(unit.serial for unit in units)
         # An abandoned stream stops its readers: this only sets the kill flag.
@@ -1186,12 +1345,13 @@ class LogStream:
         """Check the devices, open every connection and start the readers.
 
         Runs on the calling thread in three steps: each device is prepared in
-        turn (``shell_v2`` check and, with ``since="now"``, the device clock and
-        the start marker), then all logcat connections are opened back to back,
-        then all readers start (all or none). The readers wait for the start
-        marker, not ``start()``. When ``stop()`` or ``kill()`` is called, before
-        or during the start, nothing is left open and no reader starts; the
-        stream then ends at once without an error.
+        turn (``shell_v2`` check, with ``detect_skips`` the device's API level,
+        and with ``since="now"`` the device clock and the start marker), then
+        all logcat connections are opened back to back, then all readers start
+        (all or none). The readers wait for the start marker, not ``start()``.
+        When ``stop()`` or ``kill()`` is called, before or during the start,
+        nothing is left open and no reader starts; the stream then ends at once
+        without an error.
 
         Raises:
             RuntimeError: The stream was started before, or its start failed.
@@ -1217,7 +1377,12 @@ class LogStream:
                 raise _adb.Cancelled
             for unit in core.units:
                 working = unit
-                _prepare(core, unit, since=self._since is not None)
+                _prepare(
+                    core,
+                    unit,
+                    since=self._since is not None,
+                    detect_skips=self._detect_skips,
+                )
             for unit in core.units:
                 working = unit
                 opened.append(_open_first(core, unit, since=self._since is not None))
@@ -1566,6 +1731,7 @@ def _check_arguments(
     reconnect: object,
     buffer_lines: object,
     buffer_bytes: object,
+    detect_skips: object = False,
     on_entry: object = None,
 ) -> tuple[Condition | None, float]:
     """Check the arguments `stream` and `astream` have in common.
@@ -1575,6 +1741,9 @@ def _check_arguments(
     """
     _check_since(since)
     budget = _check_reconnect(reconnect)
+    if not isinstance(detect_skips, bool):
+        msg = f"detect_skips must be a bool, not {type(detect_skips).__name__}"
+        raise TypeError(msg)
     _check_limit("buffer_lines", buffer_lines, 1)
     _check_limit("buffer_bytes", buffer_bytes, _MIN_BUFFER_BYTES)
     if on_entry is not None and not callable(on_entry):
@@ -1601,6 +1770,7 @@ def stream(
     since: Literal["now"] | None = None,
     on_entry: Callable[[LogEntry], object] | None = None,
     reconnect: float = 60.0,
+    detect_skips: bool = False,
     buffer_lines: int = 10_000,
     buffer_bytes: int = 4 * 1024 * 1024,
 ) -> LogStream:
@@ -1637,8 +1807,9 @@ def stream(
       as an entry as well, and the gap comes right before it.
 
     and a ``cause``: ``released`` (logd cut the reader off), ``disconnected``
-    (the connection was lost or logcat ended), ``stalled`` (the reader closed
-    a connection itself; this stream does not do that yet) or ``notice`` (for
+    (the connection was lost or logcat ended), ``stalled`` (with
+    ``detect_skips``, on an older logd: the reader closed the connection itself
+    because it waited a second for room in the queue) or ``notice`` (for
     ``device_reported``). At most one gap is reported for one disconnect. A gap
     is reported only when the check can tell, so some losses go unreported:
 
@@ -1649,7 +1820,9 @@ def stream(
       before the disconnect, and deletions in the middle of a ring that remove
       only unread lines (logd pruning a chatty source, another tool running
       ``logcat -c``).
-    - Lines an older logd skipped without a notice while the reader was slow.
+    - Lines an older logd skipped without a notice while the reader was slow:
+      all of them without ``detect_skips``; with it, those skipped before the
+      reader had waited a whole second for room.
     - Lines that do not parse: a replayed one is delivered twice without a gap.
 
     It may also report too much: ``ring_rotated`` when the ring dropped only
@@ -1698,14 +1871,50 @@ def stream(
             ``adb_error`` when the last attempt failed that way). ``math.inf``
             never runs out of budget. 0 means: do not reconnect after a lost
             connection, an ended logcat or a failed logcat (the stream then ends with
-            ``device_lost`` or ``logcat_failed``); connections that logd cut off
-            are still resumed, and three in a row that each end within a second
-            of opening end the stream with ``logcat_failed``. Reconnecting never
+            ``device_lost`` or ``logcat_failed``); connections that logd cut
+            off, or that the reader closed itself (``detect_skips``), are still
+            resumed, and three in a row that each end within a second of
+            opening end the stream with ``logcat_failed``. Reconnecting never
             starts the adb server. ``logcat_failed`` also ends the stream when
             the first connection exits with a status from 1 to 127 before any
             standard output, other than logd's cut-off (even with
             ``math.inf``), or when logcat keeps failing or keeps being cut off
             quickly until the budget is used up.
+        detect_skips: Also detect the lines that an older logd drops without
+            any notice when the consumer falls behind. Off by default: it
+            costs a device command at the start, and a reconnect whenever the
+            queue stays full. With it, ``start()`` reads each device's API
+            level once (``getprop ro.build.version.sdk``). On API levels 25
+            and below and on 30, logd may skip lines of a reader that does not
+            keep up instead of cutting it off. There the reader closes its
+            connection itself once it has waited a whole second for room in
+            the queue since it last read from the device, waits until the
+            queue is at most half full (in lines and in bytes), and connects
+            again as after any other disconnect; lines the device no longer
+            has are then reported as a gap with the cause ``stalled``. That
+            wait counts as waiting for room, so it does not use up the budget
+            of ``stop(flush=)``. Other API levels cut a slow reader off
+            themselves, which the stream always detects, so the flag is
+            ignored for them (an INFO message says so). A device whose API
+            level cannot be read (the command fails, prints no number or a
+            number of more than four digits, or takes longer than 5 seconds)
+            is treated as an older one (a WARNING says
+            so); an adb error while reading it fails ``start()`` as the other
+            start steps do. API levels 25, 27, 33 to 35 and above 36 were not
+            tested; 25 is treated as older, the others as newer. Not detected
+            even with the flag: lines logd skipped before the reader had
+            waited a whole second, and lines skipped while the reader never
+            waits a whole second in all for room between two reads from the
+            device (a slow consumer that still takes lines often enough).
+            With several devices, a device that closed its connection this
+            way connects again only once the queue is half empty: while the
+            other devices keep it fuller than that (they log more than a slow
+            consumer takes), it stays disconnected, and lines that its own log
+            buffer on the device overwrites meanwhile are lost. They are
+            reported as a gap when it connects again where the gap check can
+            tell; the losses listed above as unreported stay unreported, such
+            as those of a buffer in which no line was read during the last
+            second before the disconnect.
         buffer_lines: Most lines queued for the consumer, over all devices (at
             least 1). A slow consumer makes the readers wait; nothing is dropped.
         buffer_bytes: The same limit in bytes of logcat output (at least 65536).
@@ -1738,6 +1947,7 @@ def stream(
         reconnect=reconnect,
         buffer_lines=buffer_lines,
         buffer_bytes=buffer_bytes,
+        detect_skips=detect_skips,
         on_entry=on_entry,
     )
     return LogStream(
@@ -1748,4 +1958,5 @@ def stream(
         buffer_lines,
         buffer_bytes,
         since,
+        detect_skips=detect_skips,
     )

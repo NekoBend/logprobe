@@ -17,13 +17,13 @@ import asyncio
 import statistics
 import threading
 import time
-from time import monotonic, sleep
+from time import monotonic, perf_counter, sleep
 from typing import TYPE_CHECKING
 
 import pytest
 
 from logprobe._aoutbox import AsyncOutbox
-from logprobe._outbox import MARKER_BYTES, TICK, Outbox
+from logprobe._outbox import MARKER_BYTES, STALLED, TICK, Outbox
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
@@ -36,6 +36,24 @@ def _spawn(target, *args) -> threading.Thread:
     thread = threading.Thread(target=target, args=args, daemon=True)
     thread.start()
     return thread
+
+
+def _bounded_put(box, *args, **kwargs) -> object:
+    """``box.put(*args, **kwargs)`` on a helper thread; fails instead of hanging.
+
+    For a put that must return on its own (a limit or an interruption): when it
+    is still waiting after `JOIN` seconds, the queue is killed to release the
+    thread and the test fails.
+    """
+    results: list[object] = []
+    thread = _spawn(lambda: results.append(box.put(*args, **kwargs)))
+    thread.join(JOIN)
+    if thread.is_alive():
+        box.request_kill()
+        thread.join(JOIN)
+        pytest.fail(f"put still waiting after {JOIN} s")
+    (result,) = results
+    return result
 
 
 def _until(predicate, limit: float = JOIN) -> None:
@@ -97,10 +115,14 @@ class LoopBox:
             self._thread.join(JOIN)
             self.loop.close()
 
-    def put(self, segments, charge, producer=None, *, interruptible=False):
+    def put(self, segments, charge, producer=None, *, interruptible=False, limit=None):
         coroutine = self.box.put(
-            segments, charge, producer, interruptible=interruptible
+            segments, charge, producer, interruptible=interruptible, limit=limit
         )
+        return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
+
+    def wait_half_empty(self, producer):
+        coroutine = self.box.wait_half_empty(producer)
         return asyncio.run_coroutine_threadsafe(coroutine, self.loop).result()
 
     def take(self, timeout=None):
@@ -333,6 +355,195 @@ class TestInterrupt:
         assert box.take(0) is not None
         plain.join(JOIN)
         assert not plain.is_alive()
+
+
+class TestStallLimit:
+    def test_a_put_past_its_limit_returns_stalled_queues_nothing_and_counts_the_wait(
+        self, make
+    ):
+        box = make(1, 10_000)
+        box.put(_chunk(1, "fill"), 1)
+        began = perf_counter()
+        assert _bounded_put(box, _chunk(1, "late"), 1, "p", limit=0.1) is STALLED
+        assert 0.1 <= perf_counter() - began < 0.1 + SLICE_LIMIT
+        assert (box.pending_lines, box.waiting) == (1, 0)
+        assert box.backpressure()["p"] >= 0.1  # the wait is back-pressure
+        chunk = box.take(0)
+        assert chunk is not None
+        assert chunk[0][0][0] == "fill"
+        assert box.take(0) is None  # "late" was not queued
+        assert box.put(_chunk(1, "next"), 1, "p", limit=0.1) == 0.0  # room: at once
+
+    def test_a_put_admitted_within_its_limit_returns_its_wait(self, make):
+        box = make(1, 10_000, tick=10)  # only the take can wake it in time
+        box.put(_chunk(1), 1)
+        results: list[object] = []
+        thread = _spawn(
+            lambda: results.append(box.put(_chunk(1, "w"), 1, "p", limit=JOIN))
+        )
+        _until(lambda: box.waiting == 1)
+        box.take(0)
+        thread.join(JOIN)
+        (waited,) = results
+        assert isinstance(waited, float)
+        assert waited < JOIN
+        assert box.pending_lines == 1
+
+    @pytest.mark.parametrize("request_name", ["request_stop", "request_kill"])
+    def test_stop_admits_and_kill_drops_before_the_limit(self, make, request_name):
+        box = make(1, 10_000)
+        box.put(_chunk(1, "fill"), 1)
+        results: list[object] = []
+        thread = _spawn(
+            lambda: results.append(box.put(_chunk(1, "w"), 1, "p", limit=JOIN))
+        )
+        _until(lambda: box.waiting == 1)
+        began = monotonic()
+        getattr(box, request_name)()
+        thread.join(JOIN)
+        assert monotonic() - began < SLICE_LIMIT
+        (result,) = results
+        assert isinstance(result, float)  # neither STALLED nor None
+        if request_name == "request_stop":
+            assert box.pending_lines == 2
+            # once stopping, even a limit that has passed admits at once
+            assert box.put(_chunk(1, "x"), 1, "p", limit=0.0) == 0.0
+            assert box.pending_lines == 3
+        else:
+            assert box.pending_lines == 0
+            assert box.put(_chunk(1, "x"), 1, "p", limit=0.0) == 0.0
+            assert box.pending_lines == 0
+
+    def test_a_stop_admits_a_limited_put_behind_another_producer_in_turn(self, make):
+        """A stopped put never stalls, even while another producer is first in line."""
+        box = make(1, 10_000, tick=5.0)  # only a notify can wake a waiter in time
+        box.put(_chunk(1, "fill"), 1)
+        first: list[object] = []
+        second: list[object] = []
+        thread_a = _spawn(lambda: first.append(box.put(_chunk(1, "a"), 1, "a")))
+        _until(lambda: box.waiting == 1)
+        box.request_stop()  # sets a flag only: "a" stays parked in its slice
+        # The limit has passed already, but a stop request is due as well.
+        thread_b = _spawn(
+            lambda: second.append(box.put(_chunk(1, "b"), 1, "b", limit=0.0))
+        )
+        _until(lambda: box.waiting == 2 or bool(second))
+        assert second == []  # "b" waits for its turn instead of giving up
+        box.wake_producers()
+        thread_a.join(JOIN)
+        thread_b.join(JOIN)
+        assert [type(result) for result in (*first, *second)] == [float, float]
+        tags = [chunk[0][0][0] for chunk in iter(lambda: box.take(0), None)]
+        assert tags == ["fill", "a", "b"]
+
+    def test_an_interruption_wins_over_the_limit(self, make):
+        """A reader that must write a flush marker does that before it gives up."""
+        box = make(1, 10_000, tick=10)
+        box.put(_chunk(1), 1)
+        box.interrupt()
+        # The limit has passed already and the interruption is due as well.
+        interrupted = _bounded_put(
+            box, _chunk(1), 1, "p", interruptible=True, limit=0.0
+        )
+        assert interrupted is None
+        # Without an interruption to honour, the same put gives up on its limit.
+        assert _bounded_put(box, _chunk(1), 1, "p", limit=0.0) is STALLED
+        assert (box.pending_lines, box.waiting) == (1, 0)
+
+
+class TestHalfEmpty:
+    def test_the_half_empty_wait_needs_both_counts_at_half(self, make):
+        box = make(4, 1000, tick=10)  # only a take can wake the wait in time
+        box.put(_chunk(1, "a"), 100)
+        box.put(_chunk(1, "b"), 500)  # 2 lines (half), 600 bytes (above half)
+        results: list[bool] = []
+        waiter = _spawn(lambda: results.append(box.wait_half_empty("p")))
+        _until(lambda: box.backpressure().get("p", 0.0) > 0.05)
+        assert waiter.is_alive()
+        box.take(0)  # 1 line, 500 bytes: both at half
+        waiter.join(JOIN)
+        assert results == [True]
+        box.put(_chunk(2, "c"), 0)  # 3 lines (above half), 500 bytes (half)
+        before = box.backpressure()["p"]
+        waiter = _spawn(lambda: results.append(box.wait_half_empty("p")))
+        _until(lambda: box.backpressure()["p"] > before + 0.05)
+        assert waiter.is_alive()
+        box.take(0)  # 2 lines, 0 bytes
+        waiter.join(JOIN)
+        assert results == [True, True]
+
+    def test_the_half_empty_wait_holds_no_place_in_line(self, make):
+        """Another device's reader is admitted as before while one waits for half."""
+        box = make(4, 10_000, tick=10)
+        box.put(_chunk(3, "fill"), 3)  # room left, but above half
+        results: list[bool] = []
+        waiter = _spawn(lambda: results.append(box.wait_half_empty("p")))
+        _until(lambda: "p" in box.backpressure())
+        assert box.waiting == 0
+        assert box.put(_chunk(1, "other"), 1, "q") == 0.0  # in at once
+        assert waiter.is_alive()
+        box.take(0)  # 1 line left
+        waiter.join(JOIN)
+        assert results == [True]
+        assert "q" not in box.backpressure()
+
+    def test_an_interruption_does_not_end_the_half_empty_wait(self, make):
+        """A flush request is handled after the reconnect, not by ending the wait."""
+        box = make(2, 10_000, tick=10)
+        box.put(_chunk(2), 2)
+        results: list[bool] = []
+        waiter = _spawn(lambda: results.append(box.wait_half_empty("p")))
+        _until(lambda: "p" in box.backpressure())
+        box.interrupt()
+        before = box.backpressure()["p"]
+        _until(lambda: box.backpressure()["p"] > before + 0.05)
+        assert waiter.is_alive()
+        box.take(0)
+        waiter.join(JOIN)
+        assert results == [True]
+
+    def test_the_half_empty_wait_counts_as_backpressure_while_and_after(self, make):
+        """A flush budget is not used up while a reader waits for half empty."""
+        box = make(2, 10_000, tick=10)
+        box.put(_chunk(2), 2)
+        waiter = _spawn(box.wait_half_empty, "p")
+        _until(lambda: "p" in box.backpressure())
+        first = box.backpressure()["p"]
+        _until(lambda: box.backpressure()["p"] > first + 0.05)  # a wait in progress
+        box.take(0)
+        waiter.join(JOIN)
+        after = box.backpressure()["p"]
+        assert after > first + 0.05
+        assert box.backpressure()["p"] == after  # ended: it no longer grows
+
+    @pytest.mark.parametrize("request_name", ["request_stop", "request_kill"])
+    def test_the_half_empty_wait_ends_on_stop_or_kill_within_a_slice(
+        self, make, request_name
+    ):
+        box = make(1, 10_000)
+        box.put(_chunk(1), 1)
+        results: list[bool] = []
+        waiter = _spawn(lambda: results.append(box.wait_half_empty("p")))
+        _until(lambda: "p" in box.backpressure())
+        began = monotonic()
+        getattr(box, request_name)()
+        waiter.join(JOIN)
+        assert monotonic() - began < SLICE_LIMIT
+        assert results == [False]
+        assert box.wait_half_empty("p") is False  # at once once stopping
+
+    def test_take_wakes_the_half_empty_wait(self, make):
+        box = make(2, 10_000, tick=10)  # no timed wake-up can help it in time
+        box.put(_chunk(1), 1)
+        box.put(_chunk(1), 1)
+        results: list[bool] = []
+        waiter = _spawn(lambda: results.append(box.wait_half_empty("p")))
+        _until(lambda: "p" in box.backpressure())
+        began = monotonic()
+        box.take(0)
+        waiter.join(JOIN)
+        assert monotonic() - began < SLICE_LIMIT
+        assert results == [True]
 
 
 class TestFairness:
@@ -730,6 +941,23 @@ class TestAsyncOnly:
             chunk = await box.take(0)
             assert chunk is not None
             assert chunk[0][0][0] == "b"  # "a" was never queued
+
+        asyncio.run(scenario())
+
+    def test_a_cancelled_half_empty_wait_leaves_no_wait_in_progress(self):
+        async def scenario():
+            box = AsyncOutbox(1, 100, tick=10)
+            await box.put(_chunk(1), 1)
+            waiter = asyncio.create_task(box.wait_half_empty("p"))
+            await asyncio.sleep(0)  # the waiter runs up to its wait
+            assert "p" in box.backpressure()
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert (box._since, box._draining) == ({}, 0)
+            first = box.backpressure()["p"]  # the wait so far is kept
+            await asyncio.sleep(0.01)
+            assert box.backpressure()["p"] == first
 
         asyncio.run(scenario())
 

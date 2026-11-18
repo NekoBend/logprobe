@@ -339,6 +339,7 @@ class Device:
         since: Literal["now"] | None = None,
         on_entry: Callable[[LogEntry], object] | None = None,
         reconnect: float = 60.0,
+        detect_skips: bool = False,
         buffer_lines: int = 10_000,
         buffer_bytes: int = 4 * 1024 * 1024,
     ) -> LogStream:
@@ -362,6 +363,7 @@ class Device:
             since=since,
             on_entry=on_entry,
             reconnect=reconnect,
+            detect_skips=detect_skips,
             buffer_lines=buffer_lines,
             buffer_bytes=buffer_bytes,
         )
@@ -377,6 +379,7 @@ class Device:
         pid: int | list[int] | tuple[int, ...] | None = None,
         since: Literal["now"] | None = None,
         reconnect: float = 60.0,
+        detect_skips: bool = False,
         buffer_lines: int = 10_000,
         buffer_bytes: int = 4 * 1024 * 1024,
     ) -> AsyncLogStream:
@@ -400,6 +403,7 @@ class Device:
             pid=pid,
             since=since,
             reconnect=reconnect,
+            detect_skips=detect_skips,
             buffer_lines=buffer_lines,
             buffer_bytes=buffer_bytes,
         )

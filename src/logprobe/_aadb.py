@@ -358,6 +358,14 @@ class AsyncShellStream:
             self._error = error
             self._finished = True
 
+    def decoded(self) -> int:
+        """The number of events decoded already and not returned yet.
+
+        They came with an earlier network read: returning them needs no new
+        one. Closing the stream keeps them readable.
+        """
+        return len(self._pending)
+
     def close(self) -> None:
         """Close the connection at once. Safe to call more than once."""
         if self._closed:

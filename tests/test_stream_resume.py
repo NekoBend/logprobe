@@ -719,7 +719,7 @@ class _Seen(logging.Handler):
 
 
 @pytest.mark.parametrize("request_name", ["stop", "kill"])
-@pytest.mark.parametrize("phase", ["backoff wait", "resume check"])
+@pytest.mark.parametrize("phase", ["backoff wait", "resume check", "half-empty wait"])
 def test_stop_and_kill_end_the_reader_promptly_while_it_waits_or_checks(
     server: FakeAdbServer,
     mode: Mode,
@@ -735,17 +735,37 @@ def test_stop_and_kill_end_the_reader_promptly_while_it_waits_or_checks(
         if phase == "backoff wait":
             # the first backoff is a full second; the stream must not sit it out
             server.add_sequence("logcat", lost(("stdout", at(0, "m0"))))
-        else:
+        elif phase == "resume check":
             # the replay never brings the line back: the check stays pending
             server.add_sequence(
                 "logcat",
                 released(("stdout", at(0, "m0"))),
                 staying(name="check"),
             )
-        s = start(server, mode)
+        else:
+            # an older logd: the reader closes the connection on the full queue
+            # and then waits for it to be half empty
+            monkeypatch.setattr(_resume, "STALL_AFTER", 0.1)
+            server.answer("getprop ro.build.version.sdk", b"24\n")
+            steps: list[Step] = [("stdout", at(0, "m0")), Wait("w0")]
+            steps += [("stdout", at(1, "m1")), Wait("w1"), ("stdout", at(2, "m2"))]
+            server.add_sequence("logcat", staying(*steps, name="held"))
+        if phase == "half-empty wait":
+            (device,) = attach(server, "a")
+            s = mode.device_stream(device, detect_skips=True, buffer_lines=2).start()
+            outbox = s._core.outbox
+            wait_until(lambda: outbox.pending_lines == 1)
+            server.release("w0")
+            wait_until(lambda: outbox.pending_lines == 2)
+            server.release("w1")
+            assert server.wait_done(1, GUARD)  # the reader closed it, m2 is held
+            assert next(iter(s)).message == "m0"  # m2 goes in: still above half
+            wait_until(lambda: outbox._draining == 1)
+        else:
+            s = start(server, mode)
         if phase == "backoff wait":
             assert seen.reconnecting.wait(GUARD)
-        else:
+        elif phase == "resume check":
             assert server.wait_reached("check", GUARD)
         began = time.monotonic()
         getattr(s, request_name)()
@@ -754,6 +774,7 @@ def test_stop_and_kill_end_the_reader_promptly_while_it_waits_or_checks(
     finally:
         logger.removeHandler(seen)
     assert s.summary.devices[0].error is None
+    # one logcat connection, or two; the half-empty wait follows the getprop
     assert len(server.records) == (1 if phase == "backoff wait" else 2)
 
 
