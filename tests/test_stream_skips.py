@@ -1514,6 +1514,22 @@ def test_a_stop_before_the_first_read_reads_nothing(
         ShellScript(steps=[("stdout", at(3, "early")), Wait("blocked", live=True)]),
     )
     s = mode.stream(attach(server, "a"), reconnect=60.0)
+    # Every socket read a reader starts after the stop; there must be none.
+    late_reads: list[object] = []
+    stopped = False
+    receive = _stream._receive
+
+    def counting_receive(sock: Any) -> bytes | None:  # noqa: ANN401
+        if stopped:
+            late_reads.append(sock)
+        return receive(sock)
+
+    monkeypatch.setattr(_stream, "_receive", counting_receive)
+
+    def stop() -> None:
+        nonlocal stopped
+        stopped = True
+        s.stop()
 
     def arrived(sock: Any) -> None:  # noqa: ANN401
         assert server.wait_reached("blocked")  # the fake wrote the line
@@ -1523,7 +1539,7 @@ def test_a_stop_before_the_first_read_reads_nothing(
         def __init__(self, conn: Any, serial: str, check: Any) -> None:  # noqa: ANN401
             super().__init__(conn, serial, check)
             arrived(conn.sock)
-            s.stop()
+            stop()
 
     class AsyncStoppingRun(_astream._ARun):
         def __init__(self, stream: Any, serial: str, check: Any) -> None:  # noqa: ANN401
@@ -1541,7 +1557,14 @@ def test_a_stop_before_the_first_read_reads_nothing(
                 assert server.wait_reached("blocked")
             else:
                 arrived(stream._writer.get_extra_info("socket"))
-            s.stop()
+            read = stream._reader.read
+
+            async def counting_read(n: int = -1) -> bytes:
+                late_reads.append(n)
+                return await read(n)
+
+            stream._reader.read = counting_read
+            stop()
 
     monkeypatch.setattr(_stream, "_Run", StoppingRun)
     monkeypatch.setattr(_astream, "_ARun", AsyncStoppingRun)
@@ -1553,6 +1576,7 @@ def test_a_stop_before_the_first_read_reads_nothing(
     summary = s.summary.devices[0]
     assert (summary.entries, summary.reconnects) == (0, 0)
     assert len(records(server, "logcat")) == 1
+    assert late_reads == []
 
 
 @pytest.mark.parametrize("rest", ["marker", "broken", "exit"])

@@ -155,7 +155,7 @@ A stream runs until you end it or it fails. These calls end it:
 
 | Call | Effect |
 | --- | --- |
-| `stop()` | The readers notice at their next check (at least every 0.25 seconds while they wait for data), process every complete line of the network reads they took, deliver the matching entries (up to a flush marker, if one is among them) and end. Once a reader sees the stop, it starts no further read; a read already under way may still bring lines, and those are handled the same way. Output not read, and a line whose end has not arrived (unless it was already cut at the 64 KiB line limit), are not delivered. To end after everything logged so far, use `stop(flush=...)`. |
+| `stop()` | The readers notice at their next check (at least every 0.25 seconds while they wait for data), process every complete line of the network reads they took, deliver the matching entries (up to the device's pending flush marker, if it is among them) and end. Once a reader sees the stop, it starts no further read; a read already under way may still bring lines, and those are handled the same way. Output not read, and a line whose end has not arrived (unless it was already cut at the 64 KiB line limit), are not delivered. To end after everything logged so far, use `stop(flush=...)`. |
 | `stop(flush=seconds)` | Each device ends at a marker line written into its log after the call. See below. |
 | `kill()` | The readers end at their next check and queue nothing more. Queued entries are dropped. |
 | `join(timeout=None)` | Waits for the stream to end and returns its `StreamSummary`. |
@@ -193,7 +193,8 @@ stream:
 - Stream with `on_entry`: the block calls `stop()`, unless you already called
   `stop()` or `stop(flush=...)`, and waits until the queued entries were given
   to the callback. A pending flush is waited for. If the body raised, the block
-  calls `stop()` in any case, which cancels a pending flush.
+  calls `stop()` in any case, which ends a pending flush as a `stop()` does
+  (`cancelled`, or `done` on a device whose marker was already read).
 - An exception from the body goes on unchanged. If the stream failed with a
   different error meanwhile, that error is logged.
 - Ctrl-C kills the stream. All waits are cut into 0.25 second slices, so

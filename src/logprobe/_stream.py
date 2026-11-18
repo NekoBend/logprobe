@@ -1497,17 +1497,18 @@ class LogStream:
         """Ask the stream to end. Never waits; any thread, any number of times.
 
         Without ``flush`` this only sets a flag, so it is safe to call from a
-        signal handler. The readers notice at their next check (at least
-        every 0.25 seconds while they wait for data), process every complete
-        line of the network reads they took, deliver the matching entries (up
-        to a flush marker, if one is among them) and end. Once a reader sees
-        the stop, it starts no further read; a read already under way may still
-        bring lines, and those are handled the same way. Output not read, and a
-        line whose end has not arrived (unless it was already cut at the 64 KiB
-        line limit), are not delivered. A stop before `start` makes the stream
-        end at once without connecting. A stop while a flush is pending ends
-        the flush as ``cancelled``, even if the marker command ends just then,
-        unless the marker is in the output the readers took (then ``done``).
+        signal handler. The readers notice at their next check (at least every
+        0.25 seconds while they wait for data), process every complete line of
+        the network reads they took, deliver the matching entries (up to the
+        device's pending flush marker, if it is among them) and end. Once a
+        reader sees the stop, it starts no further read; a read already under
+        way may still bring lines, and those are handled the same way. Output
+        not read, and a line whose end has not arrived (unless it was already
+        cut at the 64 KiB line limit), are not delivered. A stop before `start`
+        makes the stream end at once without connecting. A stop while a flush
+        is pending ends the flush as ``cancelled``, even if the marker command
+        ends just then, unless the marker is in the output the readers took
+        (then ``done``).
 
         With ``flush`` every device gets a marker line written into its log
         after the call, and its reader queues the matching entries it reads up
