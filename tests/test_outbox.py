@@ -71,7 +71,7 @@ class BlockingBox(Outbox):
 
     def consumers_parked(self) -> int:
         """Consumers inside `take`'s wait now (CPython detail)."""
-        return len(self._ready._waiters)  # ty: ignore[unresolved-attribute]
+        return len(self._ready._waiters)  # ty: ignore[missing-attribute]
 
     def interrupt(self) -> None:
         with self._space:
