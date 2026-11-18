@@ -903,9 +903,9 @@ class Package(_Members):
       the list taken for the read names the app id (another app got it after
       the watched app was removed), the lines are judged as that app's, and
       the reuse alone does not count them; they are still counted when the
-      app id is one a watched package recently left. A line's verdict depends on its app when the condition,
-      evaluated with the line's app unknown (three-valued: true, false or
-      undecided), is undecided. A line that a term without packages excludes
+      app id is one a watched package recently left. A line's verdict
+      depends on its app when the condition, evaluated with the line's app
+      unknown (three-valued: true, false or undecided), is undecided. A line that a term without packages excludes
       (``Tag("other")`` under ``Package(A) & Tag("keep")``) is not delivered
       whether or not it is A's, so not counting it loses nothing. The
       evaluation looks only at the terms, so such a line under
