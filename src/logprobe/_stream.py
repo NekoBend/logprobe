@@ -1555,12 +1555,26 @@ def _attempt_deadline(core: _CoreBase[Any], unit: _Unit) -> float | None:
     Raises:
         LogprobeError: The start marker did not come back in time.
     """
-    left = _time_left(core, unit)
-    if unit.marks.over or left is None:
-        return None
+    return _attempt_limit(core, unit)[0]
+
+
+def _attempt_limit(core: _CoreBase[Any], unit: _Unit) -> tuple[float | None, bool]:
+    """`_attempt_deadline`, and whether the flush budget (not the start marker)
+    sets it, both from one reading of the clock.
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    marks = unit.marks
+    now = perf_counter()
+    left = _time_left(core, unit, now)
+    if marks.over or left is None:
+        return None, False
     if left <= 0:
         raise _start_marker_late(unit)
-    return monotonic() + left
+    start = marks.start_left(now)
+    by_flush = start is None or not math.isfinite(start) or left < start
+    return monotonic() + left, by_flush
 
 
 def _attempt_cancelled(core: _CoreBase[Any], unit: _Unit) -> Callable[[], bool]:
@@ -1659,6 +1673,8 @@ class _Attempt(NamedTuple):
     plan: ResumePlan
     argv: list[str]
     deadline: float | None
+    # The flush budget, not the start marker, set ``deadline``.
+    by_flush: bool = False
 
 
 def _ended_at(run: _RunBase) -> float:
@@ -1738,10 +1754,10 @@ def _next_attempt(core: _CoreBase[Any], unit: _Unit, retry: _Retry) -> _Attempt 
         unit.feeder, cause_of(retry.kind), datetime.now(UTC), carried=retry.carried
     )
     argv = logcat_argv(dump=False, tail=None, t=plan.t_arg or unit.t_arg)
-    deadline = _attempt_deadline(core, unit)
+    deadline, by_flush = _attempt_limit(core, unit)
     if unit.marks.over:  # the budget ran out since the pause
         return None
-    return _Attempt(plan, argv, deadline)
+    return _Attempt(plan, argv, deadline, by_flush)
 
 
 def _attempt_failed(
@@ -1750,6 +1766,7 @@ def _attempt_failed(
     run: _RunBase,
     policy: ReconnectPolicy,
     failure: BaseException,
+    attempt: _Attempt,
 ) -> Decision | LogprobeError | None:
     """What a failed reconnect attempt leads to: a new decision, or the end.
 
@@ -1759,6 +1776,19 @@ def _attempt_failed(
     Raises:
         LogprobeError: The start marker did not come back in time.
     """
+    if (
+        attempt.deadline is not None
+        and not core.outbox.stopping
+        and monotonic() >= attempt.deadline
+    ):
+        # The handshake's deadline passed by its own clock. ``monotonic`` can
+        # move in steps of about 16 ms (Windows before Python 3.13), so the
+        # budget may still look unused by `perf_counter`: the deadline that
+        # set the limit decides.
+        if not attempt.by_flush:
+            raise _start_marker_late(unit)
+        unit.marks.budget_ran_out()
+        return None
     if (
         core.outbox.stopping
         or _budget_ended(core, unit)
@@ -1827,7 +1857,7 @@ def _serve(core: _Core, unit: _Unit) -> LogprobeError | None:
                 )
                 break
             except (_adb.Cancelled, LogprobeError, OSError) as failure:
-                failed = _attempt_failed(core, unit, run, policy, failure)
+                failed = _attempt_failed(core, unit, run, policy, failure, attempt)
                 if not isinstance(failed, Decision):
                     return failed
                 decision = failed

@@ -20,7 +20,8 @@ import math
 import shlex
 import threading
 import time
-from typing import TYPE_CHECKING, Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
@@ -956,3 +957,75 @@ def test_the_with_exit_of_an_iteration_cancels_a_flush_nobody_will_wait_for(
         s.stop(flush=60)  # the marker never comes back and nobody iterates
     assert time.monotonic() - began < PROMPT
     assert only(s).flush == "cancelled"
+
+
+def _handshake(*, by_flush: bool, deadline: float) -> tuple[Any, Any, Any]:
+    """Stubs for `_attempt_failed`: a pending flush, an attempt with ``deadline``."""
+    marks = _marks.Marks("a")
+    marks.request = cast("Any", SimpleNamespace())
+    core = SimpleNamespace(outbox=SimpleNamespace(stopping=False))
+    unit = SimpleNamespace(marks=marks, serial="a")
+    attempt = _stream._Attempt(cast("Any", None), [], deadline, by_flush)
+    return core, unit, attempt
+
+
+def test_a_handshake_deadline_passed_by_its_own_clock_ends_the_flush() -> None:
+    """``monotonic`` can move in steps of about 16 ms (Windows before Python
+    3.13): once the handshake's deadline passed by it, the flush is over even
+    if `perf_counter` still shows budget, and the device ends without error."""
+    core, unit, attempt = _handshake(by_flush=True, deadline=time.monotonic() - 0.001)
+    failure = TimeoutError("the deadline has passed")
+    result = _stream._attempt_failed(
+        core, unit, cast("Any", None), cast("Any", None), failure, attempt
+    )
+    assert result is None
+    assert unit.marks.state == "timed_out"
+
+
+def test_a_handshake_deadline_set_by_the_start_marker_is_the_marker_late() -> None:
+    core, unit, attempt = _handshake(by_flush=False, deadline=time.monotonic() - 0.001)
+    failure = TimeoutError("the deadline has passed")
+    with pytest.raises(LogprobeError, match="start marker"):
+        _stream._attempt_failed(
+            core, unit, cast("Any", None), cast("Any", None), failure, attempt
+        )
+    assert unit.marks.state == "not_requested"
+
+
+def test_a_stop_wins_over_a_passed_handshake_deadline() -> None:
+    core, unit, attempt = _handshake(by_flush=True, deadline=time.monotonic() - 0.001)
+    core.outbox.stopping = True
+    result = _stream._attempt_failed(
+        core, unit, cast("Any", None), cast("Any", None), TimeoutError("x"), attempt
+    )
+    assert result is None
+    assert unit.marks.state == "not_requested"
+
+
+@pytest.mark.parametrize(
+    ("flush", "start", "by_flush"),
+    [
+        (1.0, None, True),
+        (1.0, math.inf, True),
+        (1.0, 2.0, True),
+        (2.0, 1.0, False),
+        (None, 1.0, False),
+    ],
+)
+def test_the_handshake_limit_says_which_deadline_set_it(
+    monkeypatch: pytest.MonkeyPatch,
+    flush: float | None,
+    start: float | None,
+    *,
+    by_flush: bool,
+) -> None:
+    marks = _marks.Marks("a")
+    nearest = [x for x in (flush, start) if x is not None]
+    monkeypatch.setattr(_stream, "_time_left", lambda _c, _u, _now=None: min(nearest))
+    monkeypatch.setattr(_marks.Marks, "start_left", lambda _self, _now: start)
+    unit = SimpleNamespace(marks=marks, serial="a")
+    before = time.monotonic()
+    deadline, flag = _stream._attempt_limit(cast("Any", None), cast("Any", unit))
+    assert flag is by_flush
+    assert deadline is not None
+    assert before + min(nearest) <= deadline <= time.monotonic() + min(nearest)
