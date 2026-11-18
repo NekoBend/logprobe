@@ -24,7 +24,16 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from logprobe import Gap, LogEntry, LogprobeError, _astream, _marks, _resume, _stream
+from logprobe import (
+    Gap,
+    LogEntry,
+    LogprobeError,
+    _adb,
+    _astream,
+    _marks,
+    _resume,
+    _stream,
+)
 from tests.fake_adb_server import FakeAdbServer, Omit, ShellScript, Wait, program_of
 from tests.test_stream import (
     GUARD,
@@ -651,6 +660,47 @@ def test_a_marker_command_that_exits_with_an_error_fails_the_flush(
     s.stop(flush=60)
     assert drain(s) == ["m0"]
     assert only(s).flush == "failed"
+    assert only(s).error is None
+    assert not s.summary.complete
+
+
+def test_a_stop_while_the_marker_command_ends_wins_over_its_result(
+    server: FakeAdbServer,
+    mode: Mode,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stop that comes as the marker command ends, after it returned and
+    before the reader looked at its result, cancels the flush: the command's
+    failure does not count.
+    """
+    server.answer("log -t", exit_status=1)
+    s = flushing(server, mode, lines(0, 1))
+    wait_until(lambda: only(s).entries == 1)  # the line is read before the request
+
+    def is_marker(args: list[str]) -> bool:
+        return args[:2] == ["log", "-t"] and args[-1].startswith("flush-")
+
+    run_shell = _adb.run_shell
+    arun_shell = _astream.arun_shell
+
+    def stopping(address: Any, serial: str, args: Any, *rest: Any) -> Any:  # noqa: ANN401
+        result = run_shell(address, serial, args, *rest)
+        if is_marker(list(args)):
+            s.stop()
+        return result
+
+    async def astopping(address: Any, serial: str, args: Any, *rest: Any) -> Any:  # noqa: ANN401
+        result = await arun_shell(address, serial, args, *rest)
+        if is_marker(list(args)):
+            s.stop()
+        return result
+
+    monkeypatch.setattr(_adb, "run_shell", stopping)
+    monkeypatch.setattr(_astream, "arun_shell", astopping)
+    s.stop(flush=60)
+    assert drain(s) == ["m0"]
+    assert [words[-1][:6] for words in log_commands(server)] == ["flush-"]
+    assert only(s).flush == "cancelled"
     assert only(s).error is None
     assert not s.summary.complete
 

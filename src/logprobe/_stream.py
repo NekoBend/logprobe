@@ -509,7 +509,8 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
     and queue what it returns. While a resume check is pending, every receive
     wait that brings no data counts toward its idle time (a wait on a full
     queue does not). Reading also ends once the reader closed the connection
-    because it waited too long for room (``run.stalled``).
+    because it waited too long for room (``run.stalled``). After a stop no new
+    receive starts.
 
     Raises:
         LogprobeError: The shell protocol broke (the output before it was
@@ -526,6 +527,8 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
             limit = _marking(core, unit)
             if limit is None:
                 return
+        if outbox.stopping:  # a stop that came after the last look
+            return
         if limit != wait:
             wait = limit
             sock.settimeout(wait)
@@ -642,8 +645,9 @@ def _marker_command(unit: _Unit, step: Step) -> tuple[list[str], float]:
 def _write_marker(core: _Core, unit: _Unit, step: Step) -> None:
     """Write the flush marker of ``step``; its outcome goes to the unit's marks.
 
-    A command that stops because the stream stopped leaves no outcome: the
-    caller sees the flag.
+    A command that stops because the stream stopped leaves no outcome, and
+    neither does one that ended while the stream stopped: the stop wins, and
+    the caller sees the flag.
     """
     argv, limit = _marker_command(unit, step)
     try:
@@ -652,6 +656,8 @@ def _write_marker(core: _Core, unit: _Unit, step: Step) -> None:
         return
     except (TimeoutError, LogprobeError, OSError):  # no exit status
         unit.marks.command_done(None)
+        return
+    if core.cancelled():  # a stop that came while the command ended wins
         return
     unit.marks.command_done(result.exit_status)
 
@@ -1491,13 +1497,18 @@ class LogStream:
         """Ask the stream to end. Never waits; any thread, any number of times.
 
         Without ``flush`` this only sets a flag, so it is safe to call from a
-        signal handler. The readers notice at their next check (at least
-        every 0.25 seconds while they wait for data), queue the complete lines
-        of their last receive and end. Those are delivered; output not received
-        yet and a line whose end has not arrived (unless it was already cut at
-        the 64 KiB line limit) are not. A stop before `start`
+        signal handler. The readers notice at their next check (at least every
+        0.25 seconds while they wait for data), process every complete line of
+        the network reads they took, deliver the matching entries (up to the
+        device's pending flush marker, if it is among them) and end. Once a
+        reader sees the stop, it starts no further read; a read already under
+        way may still bring lines, and those are handled the same way. Output
+        not read, and a line whose end has not arrived (unless it was already
+        cut at the 64 KiB line limit), are not delivered. A stop before `start`
         makes the stream end at once without connecting. A stop while a flush
-        is pending cancels it.
+        is pending ends the flush as ``cancelled``, even if the marker command
+        ends just then, unless the marker is in the output the readers took
+        (then ``done``).
 
         With ``flush`` every device gets a marker line written into its log
         after the call, and its reader queues the matching entries it reads up

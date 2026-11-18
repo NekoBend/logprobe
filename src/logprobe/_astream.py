@@ -53,14 +53,17 @@ Tasks and shared state
   make a long step: devices send about one line per packet, and the step is
   then short. A fast device or a consumer that never waits therefore keeps the
   other tasks waiting for a few milliseconds at most.
-- The client has no cancel callback, so a command, the check of the device
-  features and a reconnect handshake run as a child task of the reader, which
-  looks at its flags every ``TICK`` seconds and cancels the child when the
-  stream stops or a deadline of the device passes.
+- Only the reads of logcat output ask a cancel callback of the client
+  (`AsyncShellStream.set_cancelled`); a one-shot command, the check of the
+  device features and a connection handshake have none, so they run as a
+  child task of the reader, which looks at its flags every ``TICK`` seconds
+  and cancels the child when the stream stops or a deadline of the device
+  passes.
 
 Cancellation. A reader that is cancelled at any ``await`` closes its connection
 and lets ``CancelledError`` pass; since nobody would then take what it queued,
-it also kills the stream. Leaving ``async with`` through an exception or a
+it also kills the stream. As after a kill, a protocol error it had decoded
+already still ends the stream. Leaving ``async with`` through an exception or a
 cancellation first aborts the transports of all open connections (no
 ``await``), then cancels the readers and waits for them for a short time, so
 that a second cancellation in that wait leaves nothing open.
@@ -151,7 +154,7 @@ __all__ = ["AsyncLogStream", "astream"]
 class _AUnit(_Unit):
     """A device of an asyncio stream: its connection and reader task."""
 
-    __slots__ = ("stream", "task")
+    __slots__ = ("broken", "stream", "task")
 
     def __init__(
         self, device: Device, condition: Condition | None, reconnect: float
@@ -159,6 +162,9 @@ class _AUnit(_Unit):
         super().__init__(device, condition, reconnect)
         self.stream: AsyncShellStream | None = None
         self.task: asyncio.Task[None] | None = None
+        # A protocol error the reader had decoded when it was cancelled; it
+        # still ends the device, as on a kill.
+        self.broken: LogprobeError | None = None
 
 
 class _ACore(_CoreBase[AsyncOutbox]):
@@ -203,7 +209,7 @@ class _ACore(_CoreBase[AsyncOutbox]):
 class _ARun(_RunBase):
     """One connection of an asyncio reader."""
 
-    __slots__ = ("decoded", "left", "stream")
+    __slots__ = ("broken", "decoded", "left", "stream")
 
     def __init__(
         self, stream: AsyncShellStream, serial: str, check: ResumeCheck | None
@@ -215,6 +221,8 @@ class _ARun(_RunBase):
         # batch (those events need no new network read).
         self.left: float | None = None
         self.decoded = 0
+        # A protocol error the reader found and has not raised yet.
+        self.broken: LogprobeError | None = None
 
     def stall(self) -> None:
         """Close the connection: the reader waited too long for room."""
@@ -239,7 +247,8 @@ async def _cancellable[T](
     """Await ``operation``; raise `Cancelled` within ``TICK`` of ``cancelled()``.
 
     The operation runs as a child task, because the client has no cancel
-    callback. When this call ends without handing the result over (cancelled
+    callback for a one-shot command, a feature check or a connection
+    handshake. When this call ends without handing the result over (cancelled
     itself, stopped, or the operation failed) the child is cancelled and
     awaited, and what it produced anyway is passed to ``discard``.
 
@@ -334,6 +343,10 @@ async def gather(stream: AsyncShellStream, limit: float | None) -> Batch:
     decoded already is taken (at most one read's worth): the next read that
     would have to wait is cut at once. The reader then feeds the whole batch
     in one piece, as the blocking reader does with one receive.
+
+    A read that needs a new network read after a stop ends the batch too (see
+    `AsyncShellStream.set_cancelled`), even when the last network read
+    brought only part of a packet.
     """
     batch = Batch()
     try:
@@ -346,8 +359,8 @@ async def gather(stream: AsyncShellStream, limit: float | None) -> Batch:
                 if not batch:
                     scope.reschedule(asyncio.get_running_loop().time())
                 batch.add(event)
-    except TimeoutError:
-        pass  # nothing more is ready
+    except (TimeoutError, _adb.Cancelled):
+        pass  # nothing more is ready, or the stream stopped
     except LogprobeError as broken:
         batch.broken = broken
     return batch
@@ -435,35 +448,81 @@ async def _enqueue_limited(
 
 
 async def _queue_decoded(core: _ACore, unit: _Unit, run: _ARun) -> None:
-    """After a stall: feed and queue, without a limit, what the stream decoded.
+    """The reader leaves the connection: close, then feed and queue what it decoded.
 
-    The connection is closed already, so logd no longer holds lines back; the
-    events of the last network read that no batch took yet are still in the
-    stream, and closing does not drop them. They go in like the rest of a
-    receive on the blocking stream, so the feeder counts their lines and the
-    resume starts after them. What the device sent after that read is lost
-    with the connection, as on the blocking stream.
+    Closing first means nothing more is read from the device (after a stall the
+    reader closed the connection already, so logd no longer holds lines back).
+    The events of the last network read that no batch took yet are still in
+    the stream, and closing does not drop them. They go in without a limit,
+    like the rest of a receive on the blocking stream, so the feeder counts
+    their lines and a resume starts after them. What the device sent after
+    that read is not delivered, as on the blocking stream.
 
     Raises:
         LogprobeError: The shell protocol broke after those events (they were
             queued first).
     """
     stream = run.stream
+    stream.close()
     rest = Batch()
-    broken: LogprobeError | None = None
     try:
         # The stream is closed: this takes what it holds and never waits.
         while (event := await stream.read_part()) is not None:
             rest.add(event)
     except LogprobeError as error:
-        broken = error
+        run.broken = error
     if rest:
         err = b"".join(rest.err)
         out = b"".join(rest.out)
         await _enqueue(core, unit, _feed_output(unit, run, err, out))
     run.exit_status = stream.exit_status
+    if run.broken is not None:
+        raise run.broken
+
+
+async def _discard_decoded(run: _ARun, broken: LogprobeError | None = None) -> None:
+    """After a kill: close, and drop what the stream decoded.
+
+    A protocol error among those events is still raised; ``broken`` is one
+    the last batch found already. (The blocking reader raises such an error
+    only from a receive it decoded before it saw the kill.)
+
+    Raises:
+        LogprobeError: The shell protocol broke in what the reader took.
+    """
+    stream = run.stream
+    stream.close()
+    try:
+        # The stream is closed: this takes what it holds and never waits.
+        while await stream.read_part() is not None:
+            pass
+    except LogprobeError as error:
+        broken = error
     if broken is not None:
         raise broken
+
+
+async def _end_read(core: _ACore, unit: _Unit, run: _ARun) -> None:
+    """The reader leaves the connection: queue what it decoded, or drop it on a kill.
+
+    Raises:
+        LogprobeError: The shell protocol broke in what the reader took.
+    """
+    if core.outbox.killed:
+        await _discard_decoded(run)
+    else:
+        await _queue_decoded(core, unit, run)
+
+
+async def _take_decoded(stream: AsyncShellStream) -> Batch:
+    """The next batch of what the stream decoded already; it reads nothing new."""
+    batch = Batch()
+    while batch.size < _BATCH_BYTES and stream.decoded():
+        event = await stream.read_part()
+        if event is None:  # not reached: decoded events come back first
+            break
+        batch.add(event)
+    return batch
 
 
 async def _read(core: _ACore, unit: _Unit, run: _ARun) -> None:
@@ -474,6 +533,17 @@ async def _read(core: _ACore, unit: _Unit, run: _ARun) -> None:
     feeder and queue what it returns. While a resume check is pending, every
     wait that brings no data counts toward its idle time.
 
+    The blocking reader handles a whole receive before it looks at the flags
+    and the markers again; this one feeds a network read in batches. So
+    whenever it leaves the connection for a reason other than a kill (a stop,
+    a stall, a flush that ended), it first queues the batches of the last
+    network read that it did not feed yet, and reads nothing more
+    (`_queue_decoded`); a kill drops them (`_discard_decoded`). A start marker
+    that is late fails the stream only once those batches are fed, since one
+    of them may hold the marker, and not when the read ended with an exit
+    status: the connection then ends as on the blocking reader. After a stop
+    no new read starts.
+
     Raises:
         LogprobeError: The shell protocol broke (the output before it was
             queued), or the start marker did not come back in time.
@@ -482,19 +552,32 @@ async def _read(core: _ACore, unit: _Unit, run: _ARun) -> None:
     marks = unit.marks
     stream = run.stream
     while True:
-        limit = TICK
+        limit: float | None = TICK
+        late = False
         if core.flush is not None or marks.phase is Phase.SKIPPING:
-            limit = await _marking(core, unit)
-            if limit is None:
-                return
+            try:
+                limit = await _marking(core, unit)
+            except LogprobeError as error:  # the start marker is late
+                if not stream.decoded():
+                    await _end_late(core, unit, run, error)
+                    return
+                late = True  # the rest of the last network read comes first
+        # None: the stream stopped or the flush ended; a stop may also have
+        # come after the last look. Either way no new read starts.
+        if limit is None or outbox.stopping:
+            await _end_read(core, unit, run)
+            return
         began = monotonic()
-        batch = await gather(stream, limit)
+        batch = await (_take_decoded(stream) if late else gather(stream, limit))
+        run.broken = batch.broken
         await asyncio.sleep(0)  # a fast device must not starve the other tasks
         if not batch and not batch.ended and batch.broken is None:
             if await _quiet(core, unit, run, monotonic() - began):
                 return
             continue
         if outbox.killed:
+            # Drop the batch and the rest, but still raise a protocol error.
+            await _discard_decoded(run, batch.broken)
             return
         check = run.pending()
         if check is not None and batch:
@@ -508,11 +591,24 @@ async def _read(core: _ACore, unit: _Unit, run: _ARun) -> None:
             return
         if batch.broken is not None:  # the output before it was queued already
             raise batch.broken
-        if run.stalled:
-            await _queue_decoded(core, unit, run)
+        if run.stalled or outbox.stopping:
+            await _end_read(core, unit, run)
             return
-        if outbox.stopping:
-            return
+
+
+async def _end_late(core: _ACore, unit: _Unit, run: _ARun, late: LogprobeError) -> None:
+    """The start marker is late and the last network read is fed: leave.
+
+    The stream fails with ``late``, unless that read ended with logcat's exit
+    status: the connection then ends as on the blocking reader, which handles
+    the exit status of a receive before it looks at the time again.
+
+    Raises:
+        LogprobeError: ``late``, or a protocol error in what the reader decoded.
+    """
+    await _end_read(core, unit, run)
+    if run.exit_status is None:
+        raise late
 
 
 async def _quiet(core: _ACore, unit: _Unit, run: _ARun, waited: float) -> bool:
@@ -540,7 +636,12 @@ async def _marking(core: _ACore, unit: _Unit) -> float | None:
 
 
 async def _write_marker(core: _ACore, unit: _Unit, step: Step) -> None:
-    """Write the flush marker of ``step``; its outcome goes to the unit's marks."""
+    """Write the flush marker of ``step``; its outcome goes to the unit's marks.
+
+    A command that stops because the stream stopped leaves no outcome, and
+    neither does one that ended while the stream stopped: the stop wins, and
+    the caller sees the flag.
+    """
     argv, limit = _marker_command(unit, step)
     try:
         result = await _run_command(core, unit, argv, limit)
@@ -548,6 +649,8 @@ async def _write_marker(core: _ACore, unit: _Unit, step: Step) -> None:
         return
     except (TimeoutError, LogprobeError, OSError):  # no exit status
         unit.marks.command_done(None)
+        return
+    if core.cancelled():  # a stop that came while the command ended wins
         return
     unit.marks.command_done(result.exit_status)
 
@@ -642,10 +745,15 @@ async def _serve(core: _ACore, unit: _AUnit) -> LogprobeError | None:
     first = True
     while True:
         run = _ARun(stream, unit.serial, check)
+        stream.set_cancelled(core.cancelled)  # after a stop no network read starts
         try:
             await _read(core, unit, run)
+        except asyncio.CancelledError:
+            unit.broken = await _decoded_error(run)
+            raise
         finally:
             stream.close()
+            stream.set_cancelled(None)  # the stream must not keep the core alive
         ended = _connection_ended(core, unit, run, policy, first=first)
         if not isinstance(ended, _Retry):
             return ended
@@ -678,6 +786,20 @@ async def _serve(core: _ACore, unit: _AUnit) -> LogprobeError | None:
         first = False
 
 
+async def _decoded_error(run: _ARun) -> LogprobeError | None:
+    """A cancelled reader is killed: drop what it decoded; return a protocol error.
+
+    The error is one in what the stream decoded, or one the reader found and
+    had not raised yet (``run.broken``), as `_discard_decoded` raises it after
+    a kill. Nothing here waits.
+    """
+    try:
+        await _discard_decoded(run, run.broken)
+    except LogprobeError as error:
+        return error
+    return None
+
+
 def _retrieve(task: asyncio.Task[None]) -> None:
     """Take the exception of an ended reader, so that none goes unretrieved.
 
@@ -694,7 +816,8 @@ async def _reader(core: _ACore, unit: _AUnit) -> None:
     When the task ends its connection is closed, the first error (if any) stops
     the other readers, and the end of this device is queued. A cancelled reader
     closes its connection, kills the stream (nobody would take what it queued)
-    and lets ``CancelledError`` pass.
+    and lets ``CancelledError`` pass; a protocol error it had decoded already
+    (``unit.broken``) still ends the device, as after a kill.
     """
     error: LogprobeError | None = None
     try:
@@ -703,6 +826,8 @@ async def _reader(core: _ACore, unit: _AUnit) -> None:
         error = _failure_of(unit, failure)
     except (asyncio.CancelledError, KeyboardInterrupt, SystemExit):
         core.outbox.request_kill()
+        if unit.broken is not None:  # decoded before the cancellation
+            error = _failure_of(unit, unit.broken)
         raise
     finally:
         if unit.stream is not None:
@@ -971,14 +1096,18 @@ class AsyncLogStream:
         """Ask the stream to end. Never waits; any thread, any number of times.
 
         Without ``flush`` this only sets a flag, so it is safe to call from a
-        signal handler. The readers notice at their next check (at least
-        every 0.25 seconds while they wait for data), queue the complete lines
-        of the last batch they took (about 8 KiB) and end. Those are
-        delivered; output that arrived but was not taken yet, output not read
-        yet and a line whose end has not arrived (unless it was already cut at
-        the 64 KiB line limit) are not. A stop before `start`
+        signal handler. The readers notice at their next check (at least every
+        0.25 seconds while they wait for data), process every complete line of
+        the network reads they took, deliver the matching entries (up to the
+        device's pending flush marker, if it is among them) and end. Once a
+        reader sees the stop, it starts no further read; a read already under
+        way may still bring lines, and those are handled the same way. Output
+        not read, and a line whose end has not arrived (unless it was already
+        cut at the 64 KiB line limit), are not delivered. A stop before `start`
         makes the stream end at once without connecting. A stop while a flush
-        is pending cancels it.
+        is pending ends the flush as ``cancelled``, even if the marker command
+        ends just then, unless the marker is in the output the readers took
+        (then ``done``).
 
         With ``flush`` every device gets a marker line written into its log
         after the call, and its reader queues the matching entries it reads up
@@ -1098,15 +1227,17 @@ class AsyncLogStream:
     ) -> None:
         """Leave the block: a drained stream is joined, anything else is killed.
 
-        A body that ended normally on a drained stream joins and raises the
-        stream's error. Otherwise (the stream is not drained, the body raised,
-        or the task is cancelled) the stream is killed: first the flag is set
-        and every open connection aborted, without waiting, then the readers
-        are cancelled and awaited for a short time, so that a second
-        cancellation in that wait leaves nothing open. An exception of the body
-        goes on unchanged, and an error of the stream that happened meanwhile is
-        logged. ``KeyboardInterrupt``, ``SystemExit`` and ``CancelledError`` are
-        never swallowed.
+        After a body that ended normally a drained stream is joined. Otherwise
+        (the stream is not drained, the body raised, or the task is cancelled)
+        the stream is killed: first the flag is set and every open connection
+        aborted, without waiting, then the readers are cancelled and awaited
+        for a short time, so that a second cancellation in that wait leaves
+        nothing open. A body that ended normally then raises the stream's
+        error, after the join and after the kill alike (after a kill, for
+        example, a protocol error a reader had decoded already). An exception
+        of the body goes on unchanged, and an error of the stream that happened
+        meanwhile is logged. ``KeyboardInterrupt``, ``SystemExit`` and
+        ``CancelledError`` are never swallowed.
         """
         core = self._core
         try:

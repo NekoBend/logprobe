@@ -412,16 +412,20 @@ def test_multiple_devices_keep_each_devices_order_and_serials(
     server: FakeAdbServer,
     mode: Mode,
 ) -> None:
+    # Both connections stay open: a device that ended would stop the stream,
+    # and a stop leaves what the other reader has not read yet unread.
     devices = attach(server, "a", "b")
     for serial in ("a", "b"):
         data = b"".join(logline(n, tag=serial) for n in range(300))
-        server.add_sequence(
-            "logcat", ShellScript(steps=[("stdout", data)]), serial=serial
-        )
+        server.add_sequence("logcat", hold(serial, data), serial=serial)
     s = mode.stream(devices).start()
     entries: list[LogEntry] = []
-    with contextlib.suppress(LogprobeError):
-        entries.extend(e for e in s)
+    with kill_if_hung(s):
+        for entry in s:
+            entries.append(entry)
+            if len(entries) == 600:
+                s.stop()
+        s.join(GUARD)
     for serial in ("a", "b"):
         mine = [e for e in entries if e.serial == serial]
         assert [e.message for e in mine] == names(0, 300)
