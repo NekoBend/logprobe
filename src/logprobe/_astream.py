@@ -1170,7 +1170,7 @@ async def _serve(core: _ACore, unit: _AUnit) -> LogprobeError | None:
                 )
                 break
             except (_adb.Cancelled, LogprobeError, OSError) as failure:
-                failed = _attempt_failed(core, unit, run, policy, failure)
+                failed = _attempt_failed(core, unit, run, policy, failure, attempt)
                 if not isinstance(failed, Decision):
                     return failed
                 decision = failed

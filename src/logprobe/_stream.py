@@ -1538,12 +1538,20 @@ def _time_left(
     `Marks.nearest`). Zero or less means one has passed; a flush whose budget is
     used up has ended as ``timed_out`` (``unit.marks.over``).
     """
+    return _time_left_owner(core, unit, now)[0]
+
+
+def _time_left_owner(
+    core: _CoreBase[Any], unit: _Unit, now: float | None = None
+) -> tuple[float | None, bool]:
+    """`_time_left`, and whether the flush budget is that deadline
+    (`Marks.nearest_owner`)."""
     marks = unit.marks
     waited = 0.0
     if core.flush is not None:
         marks.adopt(core.flush)
         waited = core.outbox.backpressure().get(unit.serial, 0.0)
-    return marks.nearest(perf_counter() if now is None else now, waited)
+    return marks.nearest_owner(perf_counter() if now is None else now, waited)
 
 
 def _attempt_deadline(core: _CoreBase[Any], unit: _Unit) -> float | None:
@@ -1555,12 +1563,22 @@ def _attempt_deadline(core: _CoreBase[Any], unit: _Unit) -> float | None:
     Raises:
         LogprobeError: The start marker did not come back in time.
     """
-    left = _time_left(core, unit)
+    return _attempt_limit(core, unit)[0]
+
+
+def _attempt_limit(core: _CoreBase[Any], unit: _Unit) -> tuple[float | None, bool]:
+    """`_attempt_deadline`, and whether the flush budget (not the start marker)
+    sets it, both from one reading of the clock.
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    left, by_flush = _time_left_owner(core, unit)
     if unit.marks.over or left is None:
-        return None
+        return None, False
     if left <= 0:
         raise _start_marker_late(unit)
-    return monotonic() + left
+    return monotonic() + left, by_flush
 
 
 def _attempt_cancelled(core: _CoreBase[Any], unit: _Unit) -> Callable[[], bool]:
@@ -1659,6 +1677,8 @@ class _Attempt(NamedTuple):
     plan: ResumePlan
     argv: list[str]
     deadline: float | None
+    # The flush budget, not the start marker, set ``deadline``.
+    by_flush: bool = False
 
 
 def _ended_at(run: _RunBase) -> float:
@@ -1738,10 +1758,10 @@ def _next_attempt(core: _CoreBase[Any], unit: _Unit, retry: _Retry) -> _Attempt 
         unit.feeder, cause_of(retry.kind), datetime.now(UTC), carried=retry.carried
     )
     argv = logcat_argv(dump=False, tail=None, t=plan.t_arg or unit.t_arg)
-    deadline = _attempt_deadline(core, unit)
+    deadline, by_flush = _attempt_limit(core, unit)
     if unit.marks.over:  # the budget ran out since the pause
         return None
-    return _Attempt(plan, argv, deadline)
+    return _Attempt(plan, argv, deadline, by_flush)
 
 
 def _attempt_failed(
@@ -1750,6 +1770,7 @@ def _attempt_failed(
     run: _RunBase,
     policy: ReconnectPolicy,
     failure: BaseException,
+    attempt: _Attempt,
 ) -> Decision | LogprobeError | None:
     """What a failed reconnect attempt leads to: a new decision, or the end.
 
@@ -1764,6 +1785,19 @@ def _attempt_failed(
         or _budget_ended(core, unit)
         or isinstance(failure, _adb.Cancelled)
     ):
+        return None
+    if (
+        isinstance(failure, TimeoutError)
+        and attempt.deadline is not None
+        and monotonic() >= attempt.deadline
+    ):
+        # The blocking handshake timed out at its deadline, which is on the
+        # ``monotonic`` clock. That clock can move in steps of 15.6 ms (Windows
+        # before Python 3.13), so by `perf_counter` the deadline may not have
+        # passed yet: the deadline that set the limit decides.
+        if not attempt.by_flush:
+            raise _start_marker_late(unit)
+        unit.marks.budget_ran_out()
         return None
     code = attempt_error_code(failure)
     decision = policy.attempt_failed(monotonic(), error=code)
@@ -1827,7 +1861,7 @@ def _serve(core: _Core, unit: _Unit) -> LogprobeError | None:
                 )
                 break
             except (_adb.Cancelled, LogprobeError, OSError) as failure:
-                failed = _attempt_failed(core, unit, run, policy, failure)
+                failed = _attempt_failed(core, unit, run, policy, failure, attempt)
                 if not isinstance(failed, Decision):
                     return failed
                 decision = failed
