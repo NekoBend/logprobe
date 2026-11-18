@@ -1538,12 +1538,20 @@ def _time_left(
     `Marks.nearest`). Zero or less means one has passed; a flush whose budget is
     used up has ended as ``timed_out`` (``unit.marks.over``).
     """
+    return _time_left_owner(core, unit, now)[0]
+
+
+def _time_left_owner(
+    core: _CoreBase[Any], unit: _Unit, now: float | None = None
+) -> tuple[float | None, bool]:
+    """`_time_left`, and whether the flush budget is that deadline
+    (`Marks.nearest_owner`)."""
     marks = unit.marks
     waited = 0.0
     if core.flush is not None:
         marks.adopt(core.flush)
         waited = core.outbox.backpressure().get(unit.serial, 0.0)
-    return marks.nearest(perf_counter() if now is None else now, waited)
+    return marks.nearest_owner(perf_counter() if now is None else now, waited)
 
 
 def _attempt_deadline(core: _CoreBase[Any], unit: _Unit) -> float | None:
@@ -1565,15 +1573,11 @@ def _attempt_limit(core: _CoreBase[Any], unit: _Unit) -> tuple[float | None, boo
     Raises:
         LogprobeError: The start marker did not come back in time.
     """
-    marks = unit.marks
-    now = perf_counter()
-    left = _time_left(core, unit, now)
-    if marks.over or left is None:
+    left, by_flush = _time_left_owner(core, unit)
+    if unit.marks.over or left is None:
         return None, False
     if left <= 0:
         raise _start_marker_late(unit)
-    start = marks.start_left(now)
-    by_flush = start is None or not math.isfinite(start) or left < start
     return monotonic() + left, by_flush
 
 
@@ -1777,23 +1781,23 @@ def _attempt_failed(
         LogprobeError: The start marker did not come back in time.
     """
     if (
-        attempt.deadline is not None
-        and not core.outbox.stopping
-        and monotonic() >= attempt.deadline
-    ):
-        # The handshake's deadline passed by its own clock. ``monotonic`` can
-        # move in steps of about 16 ms (Windows before Python 3.13), so the
-        # budget may still look unused by `perf_counter`: the deadline that
-        # set the limit decides.
-        if not attempt.by_flush:
-            raise _start_marker_late(unit)
-        unit.marks.budget_ran_out()
-        return None
-    if (
         core.outbox.stopping
         or _budget_ended(core, unit)
         or isinstance(failure, _adb.Cancelled)
     ):
+        return None
+    if (
+        isinstance(failure, TimeoutError)
+        and attempt.deadline is not None
+        and monotonic() >= attempt.deadline
+    ):
+        # The blocking handshake timed out at its deadline, which is on the
+        # ``monotonic`` clock. That clock can move in steps of 15.6 ms (Windows
+        # before Python 3.13), so by `perf_counter` the deadline may not have
+        # passed yet: the deadline that set the limit decides.
+        if not attempt.by_flush:
+            raise _start_marker_late(unit)
+        unit.marks.budget_ran_out()
         return None
     code = attempt_error_code(failure)
     decision = policy.attempt_failed(monotonic(), error=code)

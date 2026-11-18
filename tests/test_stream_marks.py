@@ -959,6 +959,22 @@ def test_the_with_exit_of_an_iteration_cancels_a_flush_nobody_will_wait_for(
     assert only(s).flush == "cancelled"
 
 
+class _PolicyReachedError(Exception):
+    """The failure went on to the reconnect policy (an ordinary failed attempt)."""
+
+
+@pytest.fixture
+def handshake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`_attempt_failed` with stubs: no budget ended by `perf_counter`, and the
+    policy path marked by `_PolicyReachedError`."""
+    monkeypatch.setattr(_stream, "_budget_ended", lambda _core, _unit: False)
+
+    def policy_path(_failure: BaseException) -> str:
+        raise _PolicyReachedError
+
+    monkeypatch.setattr(_stream, "attempt_error_code", policy_path)
+
+
 def _handshake(*, by_flush: bool, deadline: float) -> tuple[Any, Any, Any]:
     """Stubs for `_attempt_failed`: a pending flush, an attempt with ``deadline``."""
     marks = _marks.Marks("a")
@@ -969,36 +985,73 @@ def _handshake(*, by_flush: bool, deadline: float) -> tuple[Any, Any, Any]:
     return core, unit, attempt
 
 
-def test_a_handshake_deadline_passed_by_its_own_clock_ends_the_flush() -> None:
-    """``monotonic`` can move in steps of about 16 ms (Windows before Python
-    3.13): once the handshake's deadline passed by it, the flush is over even
-    if `perf_counter` still shows budget, and the device ends without error."""
-    core, unit, attempt = _handshake(by_flush=True, deadline=time.monotonic() - 0.001)
-    failure = TimeoutError("the deadline has passed")
-    result = _stream._attempt_failed(
+def _failed(core: Any, unit: Any, attempt: Any, failure: BaseException) -> object:  # noqa: ANN401
+    return _stream._attempt_failed(
         core, unit, cast("Any", None), cast("Any", None), failure, attempt
     )
-    assert result is None
+
+
+PASSED = -0.001  # the deadline passed this long ago by monotonic
+
+
+@pytest.mark.usefixtures("handshake")
+def test_a_handshake_timeout_at_its_deadline_ends_the_flush() -> None:
+    """``monotonic`` can move in steps of 15.6 ms (Windows before Python 3.13):
+    a handshake that timed out at its deadline by it ends the flush even if
+    `perf_counter` still shows budget, and the device ends without error."""
+    core, unit, attempt = _handshake(by_flush=True, deadline=time.monotonic() + PASSED)
+    assert _failed(core, unit, attempt, TimeoutError("the deadline has passed")) is None
     assert unit.marks.state == "timed_out"
 
 
-def test_a_handshake_deadline_set_by_the_start_marker_is_the_marker_late() -> None:
-    core, unit, attempt = _handshake(by_flush=False, deadline=time.monotonic() - 0.001)
-    failure = TimeoutError("the deadline has passed")
+@pytest.mark.usefixtures("handshake")
+def test_a_handshake_timeout_at_the_start_marker_deadline_is_the_marker_late() -> None:
+    core, unit, attempt = _handshake(by_flush=False, deadline=time.monotonic() + PASSED)
     with pytest.raises(LogprobeError, match="start marker"):
-        _stream._attempt_failed(
-            core, unit, cast("Any", None), cast("Any", None), failure, attempt
-        )
+        _failed(core, unit, attempt, TimeoutError("the deadline has passed"))
     assert unit.marks.state == "not_requested"
 
 
-def test_a_stop_wins_over_a_passed_handshake_deadline() -> None:
-    core, unit, attempt = _handshake(by_flush=True, deadline=time.monotonic() - 0.001)
-    core.outbox.stopping = True
-    result = _stream._attempt_failed(
-        core, unit, cast("Any", None), cast("Any", None), TimeoutError("x"), attempt
+@pytest.mark.usefixtures("handshake")
+@pytest.mark.parametrize(
+    ("failure", "deadline"),
+    [
+        (ConnectionRefusedError("refused"), PASSED),  # not a timeout
+        (TimeoutError("step"), 60.0),  # the deadline has not passed
+    ],
+    ids=["other-failure", "deadline-ahead"],
+)
+def test_other_handshake_failures_go_to_the_reconnect_policy(
+    failure: BaseException, deadline: float
+) -> None:
+    core, unit, attempt = _handshake(
+        by_flush=True, deadline=time.monotonic() + deadline
     )
-    assert result is None
+    with pytest.raises(_PolicyReachedError):
+        _failed(core, unit, attempt, failure)
+    assert unit.marks.state == "not_requested"
+
+
+def test_the_live_state_comes_before_a_passed_handshake_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flush that ended during the handshake (the cancel check saw its budget
+    run out) ends the device without error, whatever the attempt recorded."""
+    core, unit, attempt = _handshake(by_flush=False, deadline=time.monotonic() + PASSED)
+
+    def ended(_core: Any, unit_: Any) -> bool:  # noqa: ANN401
+        unit_.marks.state = "timed_out"
+        return True
+
+    monkeypatch.setattr(_stream, "_budget_ended", ended)
+    assert _failed(core, unit, attempt, _adb.Cancelled()) is None
+    assert unit.marks.state == "timed_out"
+
+
+def test_a_stop_wins_over_a_passed_handshake_deadline() -> None:
+    core, unit, attempt = _handshake(by_flush=True, deadline=time.monotonic() + PASSED)
+    core.outbox.stopping = True
+    assert _failed(core, unit, attempt, TimeoutError("x")) is None
     assert unit.marks.state == "not_requested"
 
 
@@ -1006,13 +1059,14 @@ def test_a_stop_wins_over_a_passed_handshake_deadline() -> None:
     ("flush", "start", "by_flush"),
     [
         (1.0, None, True),
-        (1.0, math.inf, True),
+        (1.0, math.inf, True),  # the start marker's wait before `arm`
         (1.0, 2.0, True),
+        (1.0, 1.0, True),  # a tie: the flush, as in Marks.nearest
         (2.0, 1.0, False),
         (None, 1.0, False),
     ],
 )
-def test_the_handshake_limit_says_which_deadline_set_it(
+def test_the_nearest_deadline_says_whether_the_flush_set_it(
     monkeypatch: pytest.MonkeyPatch,
     flush: float | None,
     start: float | None,
@@ -1020,12 +1074,22 @@ def test_the_handshake_limit_says_which_deadline_set_it(
     by_flush: bool,
 ) -> None:
     marks = _marks.Marks("a")
-    nearest = [x for x in (flush, start) if x is not None]
-    monkeypatch.setattr(_stream, "_time_left", lambda _c, _u, _now=None: min(nearest))
+    monkeypatch.setattr(_marks.Marks, "left", lambda _self, _now, _waited: flush)
     monkeypatch.setattr(_marks.Marks, "start_left", lambda _self, _now: start)
-    unit = SimpleNamespace(marks=marks, serial="a")
+    nearest = min(x for x in (flush, start) if x is not None and math.isfinite(x))
+    assert marks.nearest_owner(0.0, 0.0) == (nearest, by_flush)
+    assert marks.nearest(0.0, 0.0) == nearest
+
+
+def test_the_handshake_deadline_is_on_the_monotonic_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _stream, "_time_left_owner", lambda _c, _u, _now=None: (1.5, True)
+    )
+    unit = SimpleNamespace(marks=_marks.Marks("a"), serial="a")
     before = time.monotonic()
     deadline, flag = _stream._attempt_limit(cast("Any", None), cast("Any", unit))
-    assert flag is by_flush
+    assert flag is True
     assert deadline is not None
-    assert before + min(nearest) <= deadline <= time.monotonic() + min(nearest)
+    assert before + 1.5 <= deadline <= time.monotonic() + 1.5

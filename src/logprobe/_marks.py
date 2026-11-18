@@ -283,6 +283,18 @@ class Marks:
             return 0.0
         return self._nearest(left, now)
 
+    def nearest_owner(self, now: float, waited: float) -> tuple[float | None, bool]:
+        """`nearest`, and whether the flush budget is that deadline.
+
+        The flush budget wins a tie with the start marker's time, as in
+        `nearest`, where a used-up budget ends the flush.
+        """
+        flush_left = self.left(now, waited)
+        if self.over:
+            return 0.0, True
+        nearest = self._nearest(flush_left, now)
+        return nearest, flush_left is not None and nearest == flush_left
+
     def _nearest(self, flush_left: float | None, now: float) -> float | None:
         start = self.start_left(now)
         if start is None or not math.isfinite(start):
