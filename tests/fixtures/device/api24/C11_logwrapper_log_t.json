@@ -1,0 +1,172 @@
+{
+ "id": "C11",
+ "title": "logwrapper on this level; log -t writes to the main buffer",
+ "recorded_at": "2026-11-18T05:15:42+00:00",
+ "device": {
+  "ro.build.version.release": "7.0",
+  "ro.build.version.sdk": "24",
+  "ro.build.type": "userdebug",
+  "ro.product.cpu.abi": "x86_64",
+  "ro.build.fingerprint": "Android/sdk_google_phone_x86_64/generic_x86_64:7.0/NYC/6696031:userdebug/dev-keys",
+  "persist.sys.timezone": "Etc/UTC",
+  "serial": "emulator-5556",
+  "adb_client": "Version 37.0.1-15733141"
+ },
+ "facts": {
+  "lines_in_main": 10,
+  "lines_in_system": 0,
+  "lines_in_crash": 0
+ },
+ "notes": [],
+ "steps": [
+  {
+   "name": "logwrapper_echo",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "shell",
+    "logwrapper echo lp-lw-9a7fd0df"
+   ],
+   "rc": 129,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "logwrapper_burst",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "shell",
+    "logwrapper sh -c 'for i in 1 2 3 4 5 6 7 8; do echo lp-burst-9a7fd0df; done'"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "log_t",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "shell",
+    "log -t logprobe lp-mark-9a7fd0df"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "buffer_main",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-b",
+    "main",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "2026-11-18 05:15:48.093069 +0000 shell  3221  3221 I echo    : lp-lw-9a7fd0df",
+    "2026-11-18 05:15:48.123724 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123727 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123728 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123729 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123730 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123730 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123731 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.123733 +0000 shell  3226  3226 I sh      : lp-burst-9a7fd0df",
+    "2026-11-18 05:15:48.155531 +0000 shell  3228  3228 I logprobe: lp-mark-9a7fd0df "
+   ],
+   "stdout_total_lines": 3145,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "buffer_system",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-b",
+    "system",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 1124,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "buffer_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-b",
+    "crash",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.016,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  }
+ ]
+}

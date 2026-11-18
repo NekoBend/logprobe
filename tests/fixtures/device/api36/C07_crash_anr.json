@@ -1,0 +1,1111 @@
+{
+ "id": "C07",
+ "title": "Default buffers; ANR, native crash and Java crash lines",
+ "recorded_at": "2026-11-18T05:13:48+00:00",
+ "device": {
+  "ro.build.version.release": "16",
+  "ro.build.version.sdk": "36",
+  "ro.build.type": "userdebug",
+  "ro.product.cpu.abi": "x86_64",
+  "ro.build.fingerprint": "google/sdk_gphone64_x86_64/emu64xa:16/BE2A.250530.026.F3/13894323:userdebug/dev-keys",
+  "persist.sys.timezone": "Etc/UTC",
+  "serial": "emulator-5554",
+  "adb_client": "Version 37.0.1-15733141"
+ },
+ "facts": {
+  "anr": {
+   "pid": 3482,
+   "main": {
+    "tombstoned": 8,
+    "InputDispatcher": 5,
+    "libc": 4,
+    "ndroid.settings": 3,
+    "crash_dump64": 2,
+    "GoogleInputMethodService": 2,
+    "ImeTracker": 2,
+    "BatteryUsageBroadcastReceiver": 1,
+    "BootBroadcastReceiver": 1,
+    "PeriodicJobManager": 1,
+    "InsetsController": 1
+   },
+   "system": {
+    "ActivityManager": 5,
+    "CoreBackPreview": 2,
+    "PackageConfigPersister": 2,
+    "WindowManager": 1,
+    "ContextImpl": 1,
+    "BroadcastQueue": 1
+   },
+   "crash": {}
+  },
+  "native_crash": {
+   "pid": 3622,
+   "main": {
+    "crash_dump64": 2,
+    "tombstoned": 2,
+    "InputDispatcher": 2,
+    "ImeTracker": 2
+   },
+   "system": {
+    "WindowManager": 5,
+    "ActivityTaskManager": 3,
+    "WindowManagerShell": 1,
+    "ActivityManager": 1
+   },
+   "crash": {
+    "DEBUG": 30,
+    "libc": 1
+   }
+  },
+  "java_crash_am_crash": {
+   "pid": 3706,
+   "main": {
+    "tombstoned": 4,
+    "ndroid.settings": 3,
+    "InputDispatcher": 2,
+    "AndroidRuntime": 1
+   },
+   "system": {
+    "ActivityManager": 4,
+    "ActivityTaskManager": 3,
+    "WindowManager": 3,
+    "WindowManagerShell": 1,
+    "CoreBackPreview": 1
+   },
+   "crash": {
+    "AndroidRuntime": 13
+   }
+  },
+  "java_crash_bad_fragment": {
+   "pid": null,
+   "main": {
+    "BootBroadcastReceiver": 1
+   },
+   "system": {
+    "ActivityTaskManager": 1,
+    "WindowManagerShell": 1,
+    "ContextImpl": 1,
+    "BLASTSyncEngine": 1
+   },
+   "crash": {}
+  }
+ },
+ "notes": [],
+ "steps": [
+  {
+   "name": "buffers_default",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-g"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.267,
+   "stdout": [
+    "main: ring buffer is 2 MiB (1 MiB consumed, 2 MiB readable), max entry is 5120 B, max payload is 4068 B",
+    "system: ring buffer is 2 MiB (710 KiB consumed, 1 MiB readable), max entry is 5120 B, max payload is 4068 B",
+    "crash: ring buffer is 2 MiB (0 B consumed, 0 B readable), max entry is 5120 B, max payload is 4068 B",
+    "kernel: ring buffer is 2 MiB (122 KiB consumed, 312 KiB readable), max entry is 5120 B, max payload is 4068 B"
+   ],
+   "stdout_total_lines": 4,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "am_help_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am help 2>&1 | grep -i -E '^ *crash' ; echo rc=$?"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.065,
+   "stdout": [
+    "  crash [--user <USER_ID>] <PACKAGE|PID>",
+    "rc=0"
+   ],
+   "stdout_total_lines": 2,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "adb_root",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "root"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 1.17,
+   "stdout": [
+    "restarting adbd as root"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "id_u",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "id -u"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "0"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "anr_am_start",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null; am force-stop com.android.settings; sleep 1; am start -W -n com.android.settings/.Settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 1.474,
+   "stdout": [
+    "Starting: Intent { cmp=com.android.settings/.Settings }",
+    "Status: ok",
+    "LaunchState: COLD",
+    "Activity: com.android.settings/.homepage.SettingsHomepageActivity",
+    "TotalTime: 361",
+    "WaitTime: 368",
+    "Complete"
+   ],
+   "stdout_total_lines": 7,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "anr_focus",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "dumpsys window | grep -m1 mCurrentFocus"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.065,
+   "stdout": [
+    "  mCurrentFocus=Window{3c67ef6 u0 com.android.settings/com.android.settings.Settings}"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": [
+    "Failed to write while dumping service window: Broken pipe"
+   ]
+  },
+  {
+   "name": "anr_pidof",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "pidof com.android.settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "3482"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "kill_stop",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "kill -STOP 3482"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "input",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "input keyevent 20; sleep 1; input keyevent 20; input tap 200 400"
+   ],
+   "rc": null,
+   "timed_out": true,
+   "elapsed_s": 30.001,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "kill_cont",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "kill -CONT 3482"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "anr_main",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "main",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978839.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.068,
+   "stdout": [
+    "2026-11-18 05:14:05.585141 +0000  1000   650   755 W InputDispatcher: Window 3c67ef6 com.android.settings/com.android.settings.Settings is unresponsive: 3c67ef6 com.android.settings/com.android.settings.Settings is not responding. Waited 5000ms for KeyEvent(deviceId=-1, eventTime=51770000000, source=UNKNOWN, displayId=-1, action=DOWN, flags=0x00000000, keyCode=DPAD_DOWN(20), scanCode=0, metaState=",
+    "2026-11-18 05:14:05.585209 +0000  1000   650   755 W InputDispatcher: Canceling events for 3c67ef6 com.android.settings/com.android.settings.Settings because it is unresponsive",
+    "2026-11-18 05:14:05.600319 +0000  1058   270   270 I tombstoned: registered intercept for pid 3482 and type kDebuggerdJavaBacktrace",
+    "2026-11-18 05:14:15.603065 +0000  1058   270   270 I tombstoned: intercept for pid 3482 and type kDebuggerdJavaBacktrace terminated: due to timeout",
+    "2026-11-18 05:14:15.606346 +0000  1058   270   270 I tombstoned: registered intercept for pid 3482 and type kDebuggerdNativeBacktrace",
+    "2026-11-18 05:14:17.633487 +0000  1058   270   270 I tombstoned: intercept for pid 3482 and type kDebuggerdNativeBacktrace terminated: due to input",
+    "2026-11-18 05:14:20.983370 +0000 10146  2650  2781 W libc    : Access denied finding property \"persist.adb.tls_server.enable\"",
+    "2026-11-18 05:14:20.983432 +0000 10146  2650  2781 W libc    : Access denied finding property \"service.adb.tls.port\"",
+    "2026-11-18 05:14:30.656792 +0000  1000  3482  3507 I libc    : Requested dump for pid 3482 (ndroid.settings)",
+    "2026-11-18 05:14:30.657372 +0000  1000  3482  3484 I ndroid.settings: Thread[2,tid=3484,WaitingInMainSignalCatcherLoop,Thread*=0x761123328b20,peer=0x2090020,\"Signal Catcher\"]: reacting to signal 3",
+    "2026-11-18 05:14:30.657391 +0000  1000  3482  3484 I ndroid.settings: ",
+    "2026-11-18 05:14:30.691042 +0000  1000  3592  3592 I crash_dump64: obtaining output fd from tombstoned, type: kDebuggerdNativeBacktrace",
+    "2026-11-18 05:14:30.691539 +0000  1058   270   270 I tombstoned: received crash request for pid 3482",
+    "2026-11-18 05:14:30.691566 +0000  1058   270   270 E tombstoned: failed to get crash output for type kDebuggerdNativeBacktrace",
+    "2026-11-18 05:14:30.691593 +0000  1000  3592  3592 E libc    : failed to read response to DumpRequest packet: No message of desired type",
+    "2026-11-18 05:14:30.691634 +0000  1000  3592  3592 I crash_dump64: performing dump of process 3482 (target tid = 3482)",
+    "2026-11-18 05:14:30.703875 +0000  1000   650   755 I InputDispatcher: 3c67ef6 com.android.settings/com.android.settings.Settings spent 12997ms processing FocusEvent(hasFocus=false)",
+    "2026-11-18 05:14:30.705290 +0000  1000  3482  3482 D BatteryUsageBroadcastReceiver: onReceive:android.intent.action.BATTERY_LEVEL_CHANGED",
+    "2026-11-18 05:14:30.716911 +0000  1000  3482  3482 D BootBroadcastReceiver: refresh periodic job from action=com.android.settings.battery.action.PERIODIC_JOB_RECHECK",
+    "2026-11-18 05:14:30.718992 +0000  1000  3482  3482 D PeriodicJobManager: schedule next alarm job at Nov 18, 2026, 06:00:00",
+    "2026-11-18 05:14:30.723788 +0000  1000   650   755 I InputDispatcher: 3c67ef6 com.android.settings/com.android.settings.Settings spent 30139ms processing KeyEvent(deviceId=-1, eventTime=51770000000, source=UNKNOWN, displayId=-1, action=DOWN, flags=0x00000000, keyCode=DPAD_DOWN(20), scanCode=0, metaState=0x00000000, repeatCount=0), policyFlags=0x6b000000",
+    "2026-11-18 05:14:30.724160 +0000  1000   650   755 I InputDispatcher: 3c67ef6 com.android.settings/com.android.settings.Settings spent 25138ms processing KeyEvent(deviceId=-1, eventTime=56772049464, source=UNKNOWN, displayId=-1, action=UP, flags=0x00000020, keyCode=DPAD_DOWN(20), scanCode=0, metaState=0x00000000, repeatCount=0), policyFlags=0x6b000000",
+    "2026-11-18 05:14:30.758094 +0000 10153  1426  1426 I GoogleInputMethodService: GoogleInputMethodService.onStartInput():1293 onStartInput(EditorInfo{EditorInfo{packageName=com.android.settings, inputType=0, inputTypeString=NULL, enableLearning=false, autoCorrection=false, autoComplete=false, imeOptions=0, privateImeOptions=null, actionName=UNSPECIFIED, actionLabel=null, initialSelStart=-1, initialS",
+    "2026-11-18 05:14:30.763500 +0000  1000   650   763 I ImeTracker: com.android.settings:2bfa58e5: onRequestHide at ORIGIN_SERVER reason HIDE_SAME_WINDOW_FOCUSED_WITHOUT_EDITOR fromUser false",
+    "2026-11-18 05:14:30.764547 +0000 10153  1426  1426 I GoogleInputMethodService: GoogleInputMethodService.onStartInput():1293 onStartInput(EditorInfo{EditorInfo{packageName=com.android.settings, inputType=0, inputTypeString=NULL, enableLearning=false, autoCorrection=false, autoComplete=false, imeOptions=0, privateImeOptions=null, actionName=UNSPECIFIED, actionLabel=null, initialSelStart=-1, initialS",
+    "2026-11-18 05:14:30.764566 +0000  1000  3482  3482 D InsetsController: hide(ime(), fromIme=false)",
+    "2026-11-18 05:14:30.764613 +0000  1000  3482  3482 I ImeTracker: com.android.settings:2bfa58e5: onCancelled at PHASE_CLIENT_ALREADY_HIDDEN",
+    "2026-11-18 05:14:30.790274 +0000  1058   270   270 I tombstoned: received crash request for pid 3482",
+    "2026-11-18 05:14:30.792581 +0000  1000  3482  3484 I ndroid.settings: Wrote stack traces to tombstoned",
+    "2026-11-18 05:14:30.792718 +0000  1058   270   270 E tombstoned: Traces for pid 3482 written to: trace_01"
+   ],
+   "stdout_total_lines": 828,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "anr_system",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "system",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978839.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.033,
+   "stdout": [
+    "2026-11-18 05:14:05.586026 +0000  1000   650   755 I WindowManager: ANR in Window{3c67ef6 u0 com.android.settings/com.android.settings.Settings}. Reason:Input dispatching timed out (3c67ef6 com.android.settings/com.android.settings.Settings is not responding. Waited 5000ms for KeyEvent(deviceId=-1, eventTime=51770000000, source=UNKNOWN, displayId=-1, action=DOWN, flags=0x00000000, keyCode=DPAD_DOW",
+    "2026-11-18 05:14:05.595971 +0000  1000   650  3539 D ActivityManager: created ANR temporary file:/data/anr/temp_anr_5515631313330962061.txt",
+    "2026-11-18 05:14:17.641198 +0000  1000   650  3540 E ActivityManager: ANR in com.android.settings (com.android.settings/.Settings)",
+    "2026-11-18 05:14:17.641198 +0000  1000   650  3540 E ActivityManager: Reason: Input dispatching timed out (3c67ef6 com.android.settings/com.android.settings.Settings is not responding. Waited 5000ms for KeyEvent(deviceId=-1, eventTime=51770000000, source=UNKNOWN, displayId=-1, action=DOWN, flags=0x00000000, keyCode=DPAD_DOWN(20), scanCode=0, metaState=0x00000000, repeatCount=0), policyFlags=0x6b00",
+    "2026-11-18 05:14:17.641198 +0000  1000   650  3540 E ActivityManager: Parent: com.android.settings/.Settings",
+    "2026-11-18 05:14:17.643077 +0000  1000   650  3540 D ActivityManager: Completed ANR of com.android.settings in 12051ms, latency 0ms (expired, only dump ANR app)",
+    "2026-11-18 05:14:17.675136 +0000  1000   650   677 D CoreBackPreview: Window{7040fe4 u0 Application Not Responding: com.android.settings}: Setting back callback OnBackInvokedCallbackInfo{mCallback=android.window.WindowOnBackInvokedDispatcher$OnBackInvokedCallbackWrapper@a690d4e, mPriority=-1, mIsAnimationCallback=false, mOverrideBehavior=0}",
+    "2026-11-18 05:14:30.664052 +0000  1000  3482  3482 W ContextImpl: Calling a method in the system process without a qualified user: android.app.ContextImpl.sendBroadcast:1269 android.content.ContextWrapper.sendBroadcast:506 android.content.ContextWrapper.sendBroadcast:506 com.android.settings.fuelgauge.batteryusage.BootBroadcastReceiver.$r8$lambda$NYbzklSftprvatAlISPsV0wCKqc:86 com.android.settings",
+    "2026-11-18 05:14:30.724670 +0000  1000   650   997 W BroadcastQueue: Ignoring finishReceiverLocked; no active broadcast for BroadcastProcessQueue{9541eff 3482:com.android.settings/1000}",
+    "2026-11-18 05:14:30.725331 +0000  1000   650   677 D CoreBackPreview: Window{7040fe4 u0 Application Not Responding: com.android.settings}: Setting back callback null",
+    "2026-11-18 05:14:30.758728 +0000  1000   650  1725 W PackageConfigPersister: App-specific configuration not found for packageName: com.android.settings and userId: 0",
+    "2026-11-18 05:14:30.764982 +0000  1000   650  1725 W PackageConfigPersister: App-specific configuration not found for packageName: com.android.settings and userId: 0"
+   ],
+   "stdout_total_lines": 109,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "anr_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "crash",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978839.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "native_am_start",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null; am force-stop com.android.settings; sleep 1; am start -W -n com.android.settings/.Settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 1.368,
+   "stdout": [
+    "Starting: Intent { cmp=com.android.settings/.Settings }",
+    "Status: ok",
+    "LaunchState: COLD",
+    "Activity: com.android.settings/.homepage.SettingsHomepageActivity",
+    "TotalTime: 274",
+    "WaitTime: 275",
+    "Complete"
+   ],
+   "stdout_total_lines": 7,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "native_focus",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "dumpsys window | grep -m1 mCurrentFocus"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.071,
+   "stdout": [
+    "  mCurrentFocus=Window{1dceec3 u0 com.android.settings/com.android.settings.Settings}"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": [
+    "Failed to write while dumping service window: Broken pipe"
+   ]
+  },
+  {
+   "name": "native_pidof",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "pidof com.android.settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "3622"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "kill_segv",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "kill -SEGV 3622"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "native_crash_main",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "main",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978876.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.069,
+   "stdout": [
+    "2026-11-18 05:14:37.352369 +0000  1000  3668  3668 I crash_dump64: obtaining output fd from tombstoned, type: kDebuggerdTombstoneProto",
+    "2026-11-18 05:14:37.352909 +0000  1058   270   270 I tombstoned: received crash request for pid 3622",
+    "2026-11-18 05:14:37.354828 +0000  1000  3668  3668 I crash_dump64: performing dump of process 3622 (target tid = 3622)",
+    "2026-11-18 05:14:37.710684 +0000  1058   270   270 E tombstoned: Tombstone written to: tombstone_08",
+    "2026-11-18 05:14:37.721413 +0000  1000   650   755 W InputDispatcher: channel '1dceec3 com.android.settings/com.android.settings.Settings' ~ Consumer closed input channel or an error occurred.  events=0x9",
+    "2026-11-18 05:14:37.721460 +0000  1000   650   755 E InputDispatcher: channel '1dceec3 com.android.settings/com.android.settings.Settings' ~ Channel is unrecoverably broken and will be disposed!",
+    "2026-11-18 05:14:37.723575 +0000  1000   650  2013 I ImeTracker: com.android.settings:4b1ca69e: onRequestHide at ORIGIN_SERVER reason HIDE_REMOVE_CLIENT fromUser false",
+    "2026-11-18 05:14:37.723628 +0000  1000   650  2013 I ImeTracker: com.android.settings:4b1ca69e: onCancelled at PHASE_SERVER_SHOULD_HIDE"
+   ],
+   "stdout_total_lines": 285,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "native_crash_system",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "system",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978876.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.033,
+   "stdout": [
+    "2026-11-18 05:14:37.711503 +0000  1000   650  3674 W ActivityTaskManager:   Force finishing activity com.android.settings/.Settings",
+    "2026-11-18 05:14:37.712162 +0000 10182   888   950 V WindowManagerShell: Transition requested (#8): android.os.BinderProxy@4e08fbd TransitionRequestInfo { type = CLOSE, triggerTask = TaskInfo{userId=0 taskId=46 effectiveUid=1000 displayId=0 isRunning=true baseIntent=Intent { flg=0x10000000 cmp=com.android.settings/.Settings } baseActivity=ComponentInfo{com.android.settings/com.android.settings.hom",
+    "2026-11-18 05:14:37.721679 +0000  1000   650   755 I WindowManager: WINDOW DIED Window{1dceec3 u0 com.android.settings/com.android.settings.Settings}",
+    "2026-11-18 05:14:37.722891 +0000  1000   650  1631 I ActivityManager: Process com.android.settings (pid 3622) has died: fg  TOP ",
+    "2026-11-18 05:14:37.723142 +0000  1000   650  2013 I WindowManager: WIN DEATH: Window{1dceec3 u0 com.android.settings/com.android.settings.Settings EXITING}",
+    "2026-11-18 05:14:37.750338 +0000  1000   650   676 V WindowManager: Sent Transition (#8) createdAt=11-18 05:14:37.711 via request=TransitionRequestInfo { type = CLOSE, triggerTask = TaskInfo{userId=0 taskId=46 effectiveUid=1000 displayId=0 isRunning=true baseIntent=Intent { flg=0x10000000 cmp=com.android.settings/.Settings } baseActivity=ComponentInfo{com.android.settings/com.android.settings.home",
+    "2026-11-18 05:14:37.750416 +0000  1000   650   676 V WindowManager:         {WCT{RemoteToken{e3bed6f Task{eee224 #46 type=standard A=1000:com.android.settings.root}}} m=CLOSE f=NONE leash=Surface(name=Task=46)/@0xd037749 sb=Rect(0, 0 - 320, 640) eb=Rect(0, 0 - 320, 640) epz=Point(320, 640) d=0 taskParent=-1},",
+    "2026-11-18 05:14:37.772340 +0000  1000   650   680 W ActivityTaskManager: Unable to send transaction to client proc com.android.settings: no app thread",
+    "2026-11-18 05:14:38.212072 +0000  1000   650   679 W ActivityTaskManager: Activity top resumed state loss timeout for ActivityRecord{139586231 u0 com.android.settings/.Settings t46 f} isExiting}",
+    "2026-11-18 05:14:38.758217 +0000  1000   650   670 W WindowManager: Exception thrown during dispatchAppVisibility Window{1dceec3 u0 com.android.settings/com.android.settings.Settings EXITING}"
+   ],
+   "stdout_total_lines": 77,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "native_crash_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "crash",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978876.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.033,
+   "stdout": [
+    "2026-11-18 05:14:37.335067 +0000  1000  3622  3622 F libc    : Fatal signal 11 (SIGSEGV), code 0 (SI_USER from pid 3664, uid 0) in tid 3622 (ndroid.settings), pid 3622 (ndroid.settings)",
+    "2026-11-18 05:14:37.701128 +0000  1000  3668  3668 F DEBUG   : *** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***",
+    "2026-11-18 05:14:37.701184 +0000  1000  3668  3668 F DEBUG   : Build fingerprint: 'google/sdk_gphone64_x86_64/emu64xa:16/BE2A.250530.026.F3/13894323:userdebug/dev-keys'",
+    "2026-11-18 05:14:37.701191 +0000  1000  3668  3668 F DEBUG   : Revision: '0'",
+    "2026-11-18 05:14:37.701195 +0000  1000  3668  3668 F DEBUG   : ABI: 'x86_64'",
+    "2026-11-18 05:14:37.701200 +0000  1000  3668  3668 F DEBUG   : Timestamp: 2026-11-18 05:14:37.357828070+0000",
+    "2026-11-18 05:14:37.701204 +0000  1000  3668  3668 F DEBUG   : Process uptime: 4s",
+    "2026-11-18 05:14:37.701221 +0000  1000  3668  3668 F DEBUG   : Cmdline: com.android.settings",
+    "2026-11-18 05:14:37.701229 +0000  1000  3668  3668 F DEBUG   : pid: 3622, tid: 3622, name: ndroid.settings  >>> com.android.settings <<<",
+    "2026-11-18 05:14:37.701233 +0000  1000  3668  3668 F DEBUG   : uid: 1000",
+    "2026-11-18 05:14:37.701238 +0000  1000  3668  3668 F DEBUG   : signal 11 (SIGSEGV), code 0 (SI_USER from pid 3664, uid 0), fault addr --------",
+    "2026-11-18 05:14:37.701245 +0000  1000  3668  3668 F DEBUG   :     rax fffffffffffffffc  rbx 0000000000000000  rcx 00007611d3708bea  rdx 0000000000000010",
+    "2026-11-18 05:14:37.701250 +0000  1000  3668  3668 F DEBUG   :     r8  0000000000000000  r9  0000000000000008  r10 0000000000000b72  r11 0000000000000246",
+    "2026-11-18 05:14:37.701271 +0000  1000  3668  3668 F DEBUG   :     r12 0000760fa33404a8  r13 0000760fa333e630  r14 0000000000000000  r15 0000000000000b72",
+    "2026-11-18 05:14:37.701286 +0000  1000  3668  3668 F DEBUG   :     rdi 000000000000004a  rsi 00007ffd9e7d50f0",
+    "2026-11-18 05:14:37.701292 +0000  1000  3668  3668 F DEBUG   :     rbp 00007ffd9e7d51e0  rsp 00007ffd9e7d5068  rip 00007611d3708bea",
+    "2026-11-18 05:14:37.701307 +0000  1000  3668  3668 F DEBUG   : 24 total frames",
+    "2026-11-18 05:14:37.701323 +0000  1000  3668  3668 F DEBUG   : backtrace:",
+    "2026-11-18 05:14:37.701342 +0000  1000  3668  3668 F DEBUG   :       #00 pc 00000000000ddbea  /apex/com.android.runtime/lib64/bionic/libc.so (__epoll_pwait+10) (BuildId: fcb82240218d1473de1e3d2137c0be35)",
+    "2026-11-18 05:14:37.701358 +0000  1000  3668  3668 F DEBUG   :       #01 pc 000000000001707d  /system/lib64/libutils.so (android::Looper::pollOnce(int, int*, int*, void**)+413) (BuildId: 5cc628b071d29c54b7d93955e6a5c990)",
+    "2026-11-18 05:14:37.701364 +0000  1000  3668  3668 F DEBUG   :       #02 pc 00000000001b92a6  /system/lib64/libandroid_runtime.so (android::android_os_MessageQueue_nativePollOnce(_JNIEnv*, _jobject*, long, int)+38) (BuildId: 88fea1b94cf3198cbd0e8df7e23e9710)",
+    "2026-11-18 05:14:37.701369 +0000  1000  3668  3668 F DEBUG   :       #03 pc 000000000084abf3  /system/framework/x86_64/boot-framework.oat (art_jni_trampoline+131) (BuildId: 593ba0dbad2e0e4d41fe6702f77e468f5f01eae0)",
+    "2026-11-18 05:14:37.701375 +0000  1000  3668  3668 F DEBUG   :       #04 pc 00000000005216b2  /system/framework/x86_64/boot-framework.oat (android.os.MessageQueue.nextConcurrent+322) (BuildId: 593ba0dbad2e0e4d41fe6702f77e468f5f01eae0)",
+    "2026-11-18 05:14:37.701380 +0000  1000  3668  3668 F DEBUG   :       #05 pc 0000000000529111  /system/framework/x86_64/boot-framework.oat (android.os.MessageQueue.next+81) (BuildId: 593ba0dbad2e0e4d41fe6702f77e468f5f01eae0)",
+    "2026-11-18 05:14:37.701385 +0000  1000  3668  3668 F DEBUG   :       #06 pc 000000000051a81c  /system/framework/x86_64/boot-framework.oat (android.os.Looper.loopOnce+140) (BuildId: 593ba0dbad2e0e4d41fe6702f77e468f5f01eae0)",
+    "2026-11-18 05:14:37.701389 +0000  1000  3668  3668 F DEBUG   :       #07 pc 000000000051a6db  /system/framework/x86_64/boot-framework.oat (android.os.Looper.loop+235) (BuildId: 593ba0dbad2e0e4d41fe6702f77e468f5f01eae0)",
+    "2026-11-18 05:14:37.701395 +0000  1000  3668  3668 F DEBUG   :       #08 pc 000000000025c136  /system/framework/x86_64/boot-framework.oat (android.app.ActivityThread.main+1414) (BuildId: 593ba0dbad2e0e4d41fe6702f77e468f5f01eae0)",
+    "2026-11-18 05:14:37.701400 +0000  1000  3668  3668 F DEBUG   :       #09 pc 00000000002121f6  /apex/com.android.art/lib64/libart.so (art_quick_invoke_static_stub+806) (BuildId: 108a321dc93c20580e74b855c407e975)",
+    "2026-11-18 05:14:37.701406 +0000  1000  3668  3668 F DEBUG   :       #10 pc 000000000046220c  /apex/com.android.art/lib64/libart.so (art::ArtMethod::Invoke(art::Thread*, unsigned int*, unsigned int, art::JValue*, char const*)+252) (BuildId: 108a321dc93c20580e74b855c407e975)",
+    "2026-11-18 05:14:37.701411 +0000  1000  3668  3668 F DEBUG   :       #11 pc 000000000089ba20  /apex/com.android.art/lib64/libart.so (_jobject* art::InvokeMethod<(art::PointerSize)8>(art::ScopedObjectAccessAlreadyRunnable const&, _jobject*, _jobject*, _jobject*, unsigned long)+2240) (BuildId: 108a321dc93c20580e74b855c407e975)",
+    "2026-11-18 05:14:37.701417 +0000  1000  3668  3668 F DEBUG   :       #12 pc 00000000007e3a5a  /apex/com.android.art/lib64/libart.so (art::Method_invoke(_JNIEnv*, _jobject*, _jobject*, _jobjectArray*) (.__uniq.165753521025965369065708152063621506277)+42) (BuildId: 108a321dc93c20580e74b855c407e975)"
+   ],
+   "stdout_total_lines": 43,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "am_crash_am_start",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null; am force-stop com.android.settings; sleep 1; am start -W -n com.android.settings/.Settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 1.321,
+   "stdout": [
+    "Starting: Intent { cmp=com.android.settings/.Settings }",
+    "Status: ok",
+    "LaunchState: COLD",
+    "Activity: com.android.settings/.homepage.SettingsHomepageActivity",
+    "TotalTime: 245",
+    "WaitTime: 246",
+    "Complete"
+   ],
+   "stdout_total_lines": 7,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "am_crash_focus",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "dumpsys window | grep -m1 mCurrentFocus"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.033,
+   "stdout": [
+    "  mCurrentFocus=Window{e8905b1 u0 com.android.settings/com.android.settings.Settings}"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": [
+    "Failed to write while dumping service window: Broken pipe"
+   ]
+  },
+  {
+   "name": "am_crash_pidof",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "pidof com.android.settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "3706"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "am_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am crash com.android.settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "java_crash_am_crash_main",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "main",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978888.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.07,
+   "stdout": [
+    "2026-11-18 05:14:49.930182 +0000  1000  3706  3706 D AndroidRuntime: Shutting down VM",
+    "2026-11-18 05:14:54.957579 +0000  1000   650   755 W InputDispatcher: Window e8905b1 com.android.settings/com.android.settings.Settings is unresponsive: e8905b1 com.android.settings/com.android.settings.Settings is not responding. Waited 5001ms for FocusEvent(hasFocus=false)",
+    "2026-11-18 05:14:54.957651 +0000  1000   650   755 W InputDispatcher: Canceling events for e8905b1 com.android.settings/com.android.settings.Settings because it is unresponsive",
+    "2026-11-18 05:14:54.961037 +0000  1058   270   270 I tombstoned: registered intercept for pid 3706 and type kDebuggerdJavaBacktrace",
+    "2026-11-18 05:14:54.961155 +0000  1000  3706  3708 I ndroid.settings: Thread[2,tid=3708,WaitingInMainSignalCatcherLoop,Thread*=0x761123328b20,peer=0x2090020,\"Signal Catcher\"]: reacting to signal 3",
+    "2026-11-18 05:14:54.961164 +0000  1000  3706  3708 I ndroid.settings: ",
+    "2026-11-18 05:14:54.993108 +0000  1058   270   270 I tombstoned: received crash request for pid 3706",
+    "2026-11-18 05:14:54.993136 +0000  1058   270   270 I tombstoned: found intercept fd 512 for pid 3706 and type kDebuggerdJavaBacktrace",
+    "2026-11-18 05:14:54.993465 +0000  1058   270   270 W tombstoned: skipping tombstone file creation due to intercept",
+    "2026-11-18 05:14:54.993479 +0000  1000  3706  3708 I ndroid.settings: Wrote stack traces to tombstoned"
+   ],
+   "stdout_total_lines": 219,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "java_crash_am_crash_system",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "system",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978888.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "2026-11-18 05:14:49.932075 +0000  1000   650   730 W ActivityTaskManager:   Force finishing activity com.android.settings/.Settings",
+    "2026-11-18 05:14:49.932804 +0000 10182   888   950 V WindowManagerShell: Transition requested (#10): android.os.BinderProxy@c7fb16c TransitionRequestInfo { type = CLOSE, triggerTask = TaskInfo{userId=0 taskId=47 effectiveUid=1000 displayId=0 isRunning=true baseIntent=Intent { flg=0x10000000 cmp=com.android.settings/.Settings } baseActivity=ComponentInfo{com.android.settings/com.android.settings.ho",
+    "2026-11-18 05:14:49.935018 +0000  1000   650   677 I ActivityManager: Showing crash dialog for package com.android.settings u0",
+    "2026-11-18 05:14:49.955458 +0000  1000   650   677 D CoreBackPreview: Window{5c38fa4 u0 Application Error: com.android.settings}: Setting back callback OnBackInvokedCallbackInfo{mCallback=android.window.WindowOnBackInvokedDispatcher$OnBackInvokedCallbackWrapper@fcdf109, mPriority=-1, mIsAnimationCallback=false, mOverrideBehavior=0}",
+    "2026-11-18 05:14:50.433731 +0000  1000   650   679 W ActivityTaskManager: Activity top resumed state loss timeout for ActivityRecord{95063630 u0 com.android.settings/.Settings t47 f}}",
+    "2026-11-18 05:14:50.433810 +0000  1000   650   679 W ActivityTaskManager: Activity pause timeout for ActivityRecord{95063630 u0 com.android.settings/.Settings t47 f}}",
+    "2026-11-18 05:14:50.452461 +0000  1000   650   676 V WindowManager: Sent Transition (#10) createdAt=11-18 05:14:49.932 via request=TransitionRequestInfo { type = CLOSE, triggerTask = TaskInfo{userId=0 taskId=47 effectiveUid=1000 displayId=0 isRunning=true baseIntent=Intent { flg=0x10000000 cmp=com.android.settings/.Settings } baseActivity=ComponentInfo{com.android.settings/com.android.settings.hom",
+    "2026-11-18 05:14:50.452540 +0000  1000   650   676 V WindowManager:         {WCT{RemoteToken{980b50a Task{f4e8b6f #47 type=standard A=1000:com.android.settings.root}}} m=CLOSE f=NONE leash=Surface(name=Task=47)/@0xbe1e0ac sb=Rect(0, 0 - 320, 640) eb=Rect(0, 0 - 320, 640) epz=Point(320, 640) d=0 taskParent=-1},",
+    "2026-11-18 05:14:54.958446 +0000  1000   650   755 I WindowManager: ANR in Window{e8905b1 u0 com.android.settings/com.android.settings.Settings}. Reason:Input dispatching timed out (e8905b1 com.android.settings/com.android.settings.Settings is not responding. Waited 5001ms for FocusEvent(hasFocus=false)).",
+    "2026-11-18 05:14:54.958866 +0000  1000   650  3815 D ActivityManager: created ANR temporary file:/data/anr/temp_anr_8905477218852353606.txt",
+    "2026-11-18 05:14:54.964267 +0000  1000   650  3816 I ActivityManager: Crashing app skipping ANR: com.android.server.am.ProcessErrorStateRecord@f5452cd Input dispatching timed out (e8905b1 com.android.settings/com.android.settings.Settings is not responding. Waited 5001ms for FocusEvent(hasFocus=false)).",
+    "2026-11-18 05:14:54.964307 +0000  1000   650  3816 D ActivityManager: Completed ANR of com.android.settings in 3ms, latency 3ms (expired, only dump ANR app)"
+   ],
+   "stdout_total_lines": 54,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "java_crash_am_crash_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "crash",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978888.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: FATAL EXCEPTION: main",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: Process: com.android.settings, PID: 3706",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: android.app.RemoteServiceException$CrashedByAdbException: shell-induced crash",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.app.ActivityThread.throwRemoteServiceException(ActivityThread.java:2377)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.app.ActivityThread.-$$Nest$mthrowRemoteServiceException(Unknown Source:0)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.app.ActivityThread$H.handleMessage(ActivityThread.java:2741)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.os.Handler.dispatchMessage(Handler.java:110)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.os.Looper.loopOnce(Looper.java:248)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.os.Looper.loop(Looper.java:338)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat android.app.ActivityThread.main(ActivityThread.java:9067)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat java.lang.reflect.Method.invoke(Native Method)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat com.android.internal.os.RuntimeInit$MethodAndArgsCaller.run(RuntimeInit.java:593)",
+    "2026-11-18 05:14:49.930404 +0000  1000  3706  3706 E AndroidRuntime: \tat com.android.internal.os.ZygoteInit.main(ZygoteInit.java:932)"
+   ],
+   "stdout_total_lines": 14,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "bad_fragment_am_start",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null; am force-stop com.android.settings; sleep 1; am start -W -n com.android.settings/.Settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 1.32,
+   "stdout": [
+    "Starting: Intent { cmp=com.android.settings/.Settings }",
+    "Status: ok",
+    "LaunchState: COLD",
+    "Activity: com.android.settings/.homepage.SettingsHomepageActivity",
+    "TotalTime: 238",
+    "WaitTime: 241",
+    "Complete"
+   ],
+   "stdout_total_lines": 7,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "bad_fragment_focus",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "dumpsys window | grep -m1 mCurrentFocus"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.065,
+   "stdout": [
+    "  mCurrentFocus=Window{d63fbc5 u0 com.android.settings/com.android.settings.Settings}"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": [
+    "Failed to write while dumping service window: Broken pipe"
+   ]
+  },
+  {
+   "name": "bad_fragment_pidof",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "pidof com.android.settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "3842"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "am_start_bad_fragment",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am start -W -n com.android.settings/.Settings --es :settings:show_fragment com.example.logprobe.NoSuchFragment"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "Starting: Intent { cmp=com.android.settings/.Settings (has extras) }",
+    "Warning: Activity not started, intent has been delivered to currently running top-most instance.",
+    "Status: ok",
+    "LaunchState: UNKNOWN (0)",
+    "Activity: com.android.settings/.homepage.SettingsHomepageActivity",
+    "TotalTime: 0",
+    "WaitTime: 1",
+    "Complete"
+   ],
+   "stdout_total_lines": 8,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "java_crash_bad_fragment_main",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "main",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978899.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.067,
+   "stdout": [
+    "2026-11-18 05:15:03.311212 +0000  1000  3842  3842 D BootBroadcastReceiver: refresh periodic job from action=com.android.settings.battery.action.PERIODIC_JOB_RECHECK"
+   ],
+   "stdout_total_lines": 91,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "java_crash_bad_fragment_system",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "system",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978899.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.064,
+   "stdout": [
+    "2026-11-18 05:15:00.551873 +0000  1000   650  2016 I ActivityTaskManager: START u0 {flg=0x10000000 xflg=0x4 cmp=com.android.settings/.Settings (has extras)} with LAUNCH_MULTIPLE from uid 0 (BAL_ALLOW_ALLOWLISTED_UID) result code=3",
+    "2026-11-18 05:15:00.552642 +0000 10182   888   950 D WindowManagerShell: onActivityRestartAttempt: topActivity=ComponentInfo{com.android.settings/com.android.settings.homepage.SettingsHomepageActivity}, wasVisible=true",
+    "2026-11-18 05:15:03.309718 +0000  1000  3842  3842 W ContextImpl: Calling a method in the system process without a qualified user: android.app.ContextImpl.sendBroadcast:1269 android.content.ContextWrapper.sendBroadcast:506 android.content.ContextWrapper.sendBroadcast:506 com.android.settings.fuelgauge.batteryusage.BootBroadcastReceiver.$r8$lambda$NYbzklSftprvatAlISPsV0wCKqc:86 com.android.settings",
+    "2026-11-18 05:15:05.552932 +0000  1000   650   679 E BLASTSyncEngine: WM sent Transaction (#12, Transition-OPEN, tx=2791728743082) to organizer, but never received commit callback. Application ANR likely to follow."
+   ],
+   "stdout_total_lines": 8,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "java_crash_bad_fragment_crash",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-b",
+    "crash",
+    "-v",
+    "threadtime",
+    "-v",
+    "year",
+    "-v",
+    "usec",
+    "-v",
+    "zone",
+    "-v",
+    "uid",
+    "-T",
+    "1794978899.000000"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "cleanup",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS > /dev/null; am force-stop com.android.settings"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.064,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "adb_unroot",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "unroot"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 1.368,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "id_u",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "id -u"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "2000"
+   ],
+   "stdout_total_lines": 1,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  }
+ ]
+}

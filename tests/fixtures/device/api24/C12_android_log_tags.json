@@ -1,0 +1,188 @@
+{
+ "id": "C12",
+ "title": "ANDROID_LOG_TAGS from the host environment",
+ "recorded_at": "2026-11-18T05:15:42+00:00",
+ "device": {
+  "ro.build.version.release": "7.0",
+  "ro.build.version.sdk": "24",
+  "ro.build.type": "userdebug",
+  "ro.product.cpu.abi": "x86_64",
+  "ro.build.fingerprint": "Android/sdk_google_phone_x86_64/generic_x86_64:7.0/NYC/6696031:userdebug/dev-keys",
+  "persist.sys.timezone": "Etc/UTC",
+  "serial": "emulator-5556",
+  "adb_client": "Version 37.0.1-15733141"
+ },
+ "facts": {
+  "tags_silent": {
+   "lines": 0,
+   "distinct_tags": 0,
+   "top_tags": {}
+  },
+  "tags_marker_only": {
+   "lines": 2,
+   "distinct_tags": 1,
+   "top_tags": {
+    "logprobe": 2
+   }
+  },
+  "tags_removed": {
+   "lines": 456,
+   "distinct_tags": 75,
+   "top_tags": {
+    "GmsNativeLibraryLoader": 99,
+    "YouTube": 49,
+    "Conscrypt": 36,
+    "IccSmsInterfaceManager": 33,
+    "Checkin": 14
+   }
+  },
+  "tags_silent_with_filterspec": {
+   "lines": 456,
+   "distinct_tags": 75,
+   "top_tags": {
+    "GmsNativeLibraryLoader": 99,
+    "YouTube": 49,
+    "Conscrypt": 36,
+    "IccSmsInterfaceManager": 33,
+    "Checkin": 14
+   }
+  }
+ },
+ "notes": [],
+ "steps": [
+  {
+   "name": "log_t",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "shell",
+    "log -t logprobe lp-tags-9a7fd0df"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.016,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "tags_silent",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.016,
+   "stdout": [
+    "--------- beginning of main",
+    "--------- beginning of system"
+   ],
+   "stdout_total_lines": 2,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": "*:S"
+   }
+  },
+  {
+   "name": "tags_marker_only",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "--------- beginning of main",
+    "--------- beginning of system",
+    "11-18 05:15:48.155  3228  3228 I logprobe: lp-mark-9a7fd0df ",
+    "11-18 05:15:48.280  3239  3239 I logprobe: lp-tags-9a7fd0df "
+   ],
+   "stdout_total_lines": 4,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": "logprobe:V *:S"
+   }
+  },
+  {
+   "name": "tags_removed",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.033,
+   "stdout": [
+    "--------- beginning of main",
+    "11-18 05:15:43.503  1818  2331 W GLSUser : [DeviceKeyStore] Cannot load key: Device key file not found.",
+    "11-18 05:15:43.505  2275  2825 I ChimeraConfigurator: Starting update, reason: 4 urgentFeatures: vision.ocr:-1",
+    "11-18 05:15:43.505  2919  2919 D NetworkSecurityConfig: Using Network Security Config from resource network_security_config debugBuild: false",
+    "11-18 05:15:43.506  2919  2919 I ProviderInstaller: Installed default security provider GmsCore_OpenSSL"
+   ],
+   "stdout_total_lines": 458,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": null
+   }
+  },
+  {
+   "name": "tags_silent_with_filterspec",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5556",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime",
+    "*:V"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "--------- beginning of main",
+    "11-18 05:15:43.503  1818  2331 W GLSUser : [DeviceKeyStore] Cannot load key: Device key file not found.",
+    "11-18 05:15:43.505  2275  2825 I ChimeraConfigurator: Starting update, reason: 4 urgentFeatures: vision.ocr:-1",
+    "11-18 05:15:43.505  2919  2919 D NetworkSecurityConfig: Using Network Security Config from resource network_security_config debugBuild: false",
+    "11-18 05:15:43.506  2919  2919 I ProviderInstaller: Installed default security provider GmsCore_OpenSSL"
+   ],
+   "stdout_total_lines": 458,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": "*:S"
+   }
+  }
+ ]
+}

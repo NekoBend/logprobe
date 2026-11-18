@@ -1,0 +1,60 @@
+[project]
+name = "logprobe"
+version = "0.1.0a1.dev0"
+description = "A fast, light Android logcat library for Python: read device logs live or as a snapshot, parse saved logcat files, filter entries and export them."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.13.6,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+    "ruff==0.17.3",
+    "ty==0.0.95",
+]
+
+# preview = true also switches the selected stable rules to their preview
+# behavior (stricter in places). explicit-preview-rules keeps every new preview
+# rule off unless it is named in select (here B909 and RUF029), because preview
+# rules change without notice. Ruff is pinned, so all of this changes only when
+# the pin is raised.
+[tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
+select = ["A", "ANN", "ARG", "ASYNC", "B", "BLE", "C4", "DTZ", "E", "F", "FBT", "FURB", "G", "I", "ICN", "N", "PERF", "PIE", "PLR", "PT", "PTH", "RSE", "RUF", "S", "SIM", "SLF", "T20", "TC", "UP", "W", "B909", "RUF029"]
+ignore = ["ANN204", "PLR0913", "PLR0917", "PLR2004"]
+
+# The benchmark scripts in bench/ are command-line tools: they print their
+# results and start the fake server and the other benchmarks as child processes
+# (a fixed command line, no shell, no user text). Tests may use assert, touch
+# private members, run subprocesses, skip annotations, and define async
+# functions that never await or that take a timeout argument (callbacks and
+# helpers shaped by the API under test).
+[tool.ruff.lint.per-file-ignores]
+"bench/**" = ["T201", "S603"]
+"src/logprobe/_adb.py" = ["S603"]
+# The async client takes the same per-step "timeout" argument as the blocking one.
+"src/logprobe/_aadb.py" = ["ASYNC109"]
+# AsyncOutbox.take and AsyncLogStream.join take the same "timeout" argument as
+# the blocking Outbox.take and LogStream.join.
+"src/logprobe/_aoutbox.py" = ["ASYNC109"]
+"src/logprobe/_astream.py" = ["ASYNC109"]
+"tests/**" = ["S101", "SLF001", "ANN001", "ANN201", "ANN202", "ANN002", "ANN003", "S603", "ASYNC109", "RUF029"]
+
+# An unused `ty: ignore` comment must fail the check.
+[tool.ty.rules]
+unused-ignore-comment = "error"
+
+# An exception escaping a thread or __del__ must fail the test run instead of
+# only printing a warning.
+[tool.pytest.ini_options]
+filterwarnings = [
+    "error::pytest.PytestUnhandledThreadExceptionWarning",
+    "error::pytest.PytestUnraisableExceptionWarning",
+]

@@ -1,0 +1,184 @@
+{
+ "id": "C12",
+ "title": "ANDROID_LOG_TAGS from the host environment",
+ "recorded_at": "2026-11-18T05:13:48+00:00",
+ "device": {
+  "ro.build.version.release": "16",
+  "ro.build.version.sdk": "36",
+  "ro.build.type": "userdebug",
+  "ro.product.cpu.abi": "x86_64",
+  "ro.build.fingerprint": "google/sdk_gphone64_x86_64/emu64xa:16/BE2A.250530.026.F3/13894323:userdebug/dev-keys",
+  "persist.sys.timezone": "Etc/UTC",
+  "serial": "emulator-5554",
+  "adb_client": "Version 37.0.1-15733141"
+ },
+ "facts": {
+  "tags_silent": {
+   "lines": 0,
+   "distinct_tags": 0,
+   "top_tags": {}
+  },
+  "tags_marker_only": {
+   "lines": 2,
+   "distinct_tags": 1,
+   "top_tags": {
+    "logprobe": 2
+   }
+  },
+  "tags_removed": {
+   "lines": 348,
+   "distinct_tags": 56,
+   "top_tags": {
+    "InetDiagMessage": 52,
+    "BugleDataModel": 30,
+    "resolv": 30,
+    "rdv": 26,
+    "BoundBrokerSvc": 25
+   }
+  },
+  "tags_silent_with_filterspec": {
+   "lines": 348,
+   "distinct_tags": 56,
+   "top_tags": {
+    "InetDiagMessage": 51,
+    "BugleDataModel": 30,
+    "resolv": 30,
+    "rdv": 26,
+    "BoundBrokerSvc": 25
+   }
+  }
+ },
+ "notes": [],
+ "steps": [
+  {
+   "name": "log_t",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "shell",
+    "log -t logprobe lp-tags-49e0d2ae"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": []
+  },
+  {
+   "name": "tags_silent",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.064,
+   "stdout": [],
+   "stdout_total_lines": 0,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": "*:S"
+   }
+  },
+  {
+   "name": "tags_marker_only",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "--------- beginning of main",
+    "11-18 05:13:53.754  3413  3413 I logprobe: lp-mark-49e0d2ae",
+    "11-18 05:13:54.164  3426  3426 I logprobe: lp-tags-49e0d2ae"
+   ],
+   "stdout_total_lines": 3,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": "logprobe:V *:S"
+   }
+  },
+  {
+   "name": "tags_removed",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.064,
+   "stdout": [
+    "--------- beginning of main",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed live tcp sockets for uids={10169} in 0ms",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed 0 sockets, proto=IPPROTO_TCP, family=AF_INET, states=14",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed 0 sockets, proto=IPPROTO_TCP, family=AF_INET6, states=14",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed live tcp sockets for uids={20169} in 1ms"
+   ],
+   "stdout_total_lines": 351,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": null
+   }
+  },
+  {
+   "name": "tags_silent_with_filterspec",
+   "where": "adb",
+   "argv": [
+    "-s",
+    "emulator-5554",
+    "logcat",
+    "-d",
+    "-t",
+    "300",
+    "-v",
+    "threadtime",
+    "*:V"
+   ],
+   "rc": 0,
+   "timed_out": false,
+   "elapsed_s": 0.032,
+   "stdout": [
+    "--------- beginning of main",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed 0 sockets, proto=IPPROTO_TCP, family=AF_INET, states=14",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed 0 sockets, proto=IPPROTO_TCP, family=AF_INET6, states=14",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed live tcp sockets for uids={20169} in 1ms",
+    "11-18 05:13:48.196   650   800 D InetDiagMessage: Destroyed 0 sockets, proto=IPPROTO_TCP, family=AF_INET, states=14"
+   ],
+   "stdout_total_lines": 351,
+   "stdout_clipped_lines": 0,
+   "stderr": [],
+   "env": {
+    "ANDROID_LOG_TAGS": "*:S"
+   }
+  }
+ ]
+}
