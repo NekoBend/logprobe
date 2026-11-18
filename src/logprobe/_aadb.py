@@ -29,6 +29,7 @@ from logprobe._adb import (
     CLOSE_STDIN,
     DEFAULT_TIMEOUT,
     RECV_SIZE,
+    Cancelled,
     ServerAddress,
     ShellEvent,
     ShellResult,
@@ -265,6 +266,7 @@ class AsyncShellStream:
         self._finished = False
         self._closed = False
         self._timeout: float | None = None
+        self._cancelled: Callable[[], bool] | None = None
         self.exit_status: int | None = None
 
     async def __aenter__(self) -> AsyncShellStream:
@@ -288,6 +290,16 @@ class AsyncShellStream:
         """
         self._timeout = timeout
 
+    def set_cancelled(self, cancelled: Callable[[], bool] | None) -> None:
+        """Set a callback asked before each network read (None: none).
+
+        Once it returns true no network read starts any more: the stream
+        closes and raises `Cancelled` instead. What it decoded already, events
+        and a protocol error alike, comes back first: only a read that needs a
+        new network read raises `Cancelled`, and later reads return None.
+        """
+        self._cancelled = cancelled
+
     async def read(self) -> ShellEvent | None:
         """Return the next stdout or stderr event, or None at the end.
 
@@ -302,6 +314,8 @@ class AsyncShellStream:
             LogprobeError: ``adb_error`` if the device sent an empty exit
                 packet. Output received before it is returned first, the
                 stream is closed, and later reads return None.
+            Cancelled: The callback set with :meth:`set_cancelled` returned
+                true before a network read; the stream is closed.
         """
         return await self._next(parts=False)
 
@@ -334,6 +348,9 @@ class AsyncShellStream:
         if self._closed:
             self._finished = True
             return
+        if self._cancelled is not None and self._cancelled():
+            self.close()
+            raise Cancelled
         # A reset after output arrived reads as the end of the stream, as in
         # the blocking stream: the output stays readable, there is no status.
         if self._timeout is None:

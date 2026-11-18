@@ -13,6 +13,7 @@ import asyncio
 import gc
 import inspect
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
@@ -501,6 +502,41 @@ def test_an_abandoned_stream_ends_its_readers(server: FakeAdbServer) -> None:
         gc.collect()  # the stream is gone; its finalizer set the kill flag
         async with asyncio.timeout(PROMPT):
             await asyncio.wait(tasks)
+        await closed(server)
+
+    run(scenario)
+
+
+def test_a_stopped_stream_is_freed_without_the_cycle_collector(
+    server: FakeAdbServer,
+) -> None:
+    """The stop callback that each connection asks before a read is cleared
+    when the connection ends: otherwise the last connection of a device and
+    the stream's shared state keep each other, and the buffers they hold,
+    alive until the cycle collector runs.
+    """
+    server.add_sequence("logcat", hold("a", lines(0, 2)))
+
+    async def finished() -> weakref.ref[object]:
+        s = open_stream(server)
+        async with s:
+            await until(lambda: s.summary.devices[0].lines == 2)
+            s.stop()
+            got, error = await collect(s)
+        assert got == names(0, 2)
+        assert error is None
+        connection = s._units[0].stream
+        assert connection is not None
+        return weakref.ref(connection)
+
+    async def scenario() -> None:
+        gc.collect()
+        gc.disable()
+        try:
+            connection = await finished()
+            assert connection() is None
+        finally:
+            gc.enable()
         await closed(server)
 
     run(scenario)
