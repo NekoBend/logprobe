@@ -1867,14 +1867,17 @@ def stream(
             seconds. The budget is checked when a failure happens, so it is not
             a deadline: an attempt that starts just before it runs out can
             still connect. When a failure finds it used up, the stream
-            ends with ``device_lost`` (``adb_server_unavailable`` or
-            ``adb_error`` when the last attempt failed that way). ``math.inf``
+            ends with the error of that failure: ``device_lost`` for a lost
+            or ended connection, ``logcat_failed`` for a failed logcat
+            (``adb_server_unavailable`` or ``adb_error`` when the last attempt
+            failed that way). ``math.inf``
             never runs out of budget. 0 means: do not reconnect after a lost
             connection, an ended logcat or a failed logcat (the stream then ends with
             ``device_lost`` or ``logcat_failed``); connections that logd cut
-            off, or that the reader closed itself (``detect_skips``), are still
-            resumed, and three in a row that each end within a second of
-            opening end the stream with ``logcat_failed``. Reconnecting never
+            off are still resumed, and three in a row that each end within a
+            second of opening end the stream with ``logcat_failed``.
+            Connections the reader closed itself (``detect_skips``) before an
+            exit status arrived are always resumed. Reconnecting never
             starts the adb server. ``logcat_failed`` also ends the stream when
             the first connection exits with a status from 1 to 127 before any
             standard output, other than logd's cut-off (even with

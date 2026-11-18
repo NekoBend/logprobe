@@ -310,7 +310,8 @@ How a connection ended decides what happens next:
 | The connection | What the stream does | Error when it gives up |
 | --- | --- | --- |
 | was cut off by logd (exit status 1 and logcat's "unexpected EOF" message) | Reconnects at once. This is not a failure, unless three connections in a row each end within one second of opening. | `logcat_failed` |
-| closed without an exit status | Counts a failure and retries. | `device_lost` |
+| was closed by the reader itself after waiting a whole second for room (`detect_skips`), before an exit status arrived | Waits until the queue is at most half full, then reconnects. This is not a failure and never counts as a quick end. | none |
+| was lost: closed without an exit status | Counts a failure and retries. | `device_lost` |
 | ended with exit status 0, or 128 or higher (a signal) | Counts a failure and retries. The first such retry after the start, and the first after each stable connection, is immediate. | `device_lost` |
 | failed with another status before any standard output, on the first connection | Ends the stream at once. | `logcat_failed` |
 | failed with another non-zero status | Counts a failure and retries. | `logcat_failed` |
@@ -333,9 +334,13 @@ else (for example a timeout or a broken connection).
   fails before any standard output (the fourth row of the table), a late start
   marker or a broken shell protocol still end the stream.
 - `reconnect=0` does not recover a lost connection, an ended logcat or a failed
-  logcat. Connections that logd cut off, or that the reader closed itself
-  (`detect_skips`), are still resumed, and three in a row that each end within
-  one second end the stream with `logcat_failed`.
+  logcat. Connections that logd cut off are still resumed, and three in a row
+  that each end within one second end the stream with `logcat_failed`.
+  Connections the reader closed itself (`detect_skips`) before an exit status
+  arrived are always resumed. When a read holds both the stall and logcat's
+  exit status, the exit status decides, as in the table.
+- When different failures share one budget, the failure that finds the budget
+  used up decides the error.
 - Reconnecting never starts the adb server.
 
 The resume check keeps the most recent lines (up to 2 MiB or 20,000 lines) to
@@ -436,7 +441,7 @@ While a reader waits, it does not read its connection, but the device keeps
 logging. If the reader falls far behind, the device's logd may cut it off or
 skip lines. When logd cuts it off, the stream reconnects and resumes as
 described above, and reports what it can detect as a gap. Skipped lines are
-detected only with `detect_skips` (below).
+detected, in part, only with `detect_skips` (below).
 
 ## Detect skipped lines with `detect_skips`
 
@@ -461,8 +466,10 @@ With `detect_skips=True`:
   once it has waited a whole second for room in the queue since it last read
   from the device. A WARNING says so. It then waits until the queue is at most
   half full (in lines and in bytes), and connects again as after any other
-  disconnect. Lines the device no longer has are reported as a gap with the
-  cause `stalled`. The wait counts as waiting for room, so it does not use up
+  disconnect. A gap with the cause `stalled` is reported when the replay check
+  finds lines missing or cannot verify that the new connection continues the
+  old one; lines lost in a log buffer from which nothing was read in the last
+  second before the stall can go unreported. The wait counts as waiting for room, so it does not use up
   the budget of `stop(flush=...)`.
 - Other API levels cut a slow reader off themselves, which the stream always
   detects, so the option is ignored for them. An INFO message says so.
@@ -470,7 +477,8 @@ With `detect_skips=True`:
   or a number of more than four digits, or takes longer than 5 seconds) is
   treated as an older one, and a WARNING says so. An adb error while reading
   it fails `start()` as the other start steps do.
-- API levels 25, 27, 33 to 35 and above 36 were not tested; 25 is treated as
+- logd's behaviour was measured on emulators at API levels 24, 26, 28 to 32
+  and 36. Levels 25, 27, 33 to 35 and above 36 were not; 25 is treated as
   older, the others as newer.
 
 Not detected, even with the option:

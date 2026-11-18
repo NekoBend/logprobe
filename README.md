@@ -16,8 +16,8 @@ not accepted while logprobe is in alpha.
 - A live stream reconnects after a dropped connection and resumes where it
   stopped. Where it can tell that lines may be missing or repeated, it reports
   a `Gap` record; some losses cannot be detected. With
-  `detect_skips=True` it also detects lines that an older logd drops without
-  notice when the consumer falls behind.
+  `detect_skips=True` it also detects most lines that an older logd drops
+  without notice when the consumer falls behind.
 - Parses logcat text in the `threadtime`, `brief`, `process`, `tag` and `raw`
   formats, from files (`read_file`) or any iterable of lines (`parse_lines`).
 - Filters entries with conditions such as
