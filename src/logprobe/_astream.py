@@ -140,7 +140,7 @@ from ._stream import (
     _judge_read,
     _list_cancelled,
     _list_is_due,
-    _list_limit,
+    _list_limit_of,
     _list_too_late,
     _list_wait_step,
     _listing_wait_step,
@@ -403,8 +403,10 @@ async def _take_list(
     job = attributor.list_started(perf_counter())
     job.started = perf_counter()
     while not job.finished:
-        limit = (
-            deadline - perf_counter() if starting else _list_limit(core, unit, deadline)
+        limit, by_flush = (
+            (deadline - perf_counter(), False)
+            if starting
+            else _list_limit_of(core, unit, deadline)
         )
         if limit <= 0:
             job.fail(late)
@@ -418,6 +420,8 @@ async def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
+            if by_flush and not core.outbox.stopping:  # a stop comes first
+                unit.marks.budget_ran_out()
             job.fail(late)
         except (LogprobeError, OSError) as error:
             if starting:

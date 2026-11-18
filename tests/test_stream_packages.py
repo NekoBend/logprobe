@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import logging
+import sys
 import threading
 import time
 from datetime import timedelta
@@ -1947,6 +1948,8 @@ def test_a_regular_list_that_ends_during_a_network_read_waits_for_the_next_one(
     """The regular list (A reinstalled, its old uid given to B) ends while the
     first packet of one network read is queued; the second packet of that
     read is still judged with the list before it, in both readers."""
+    if mode.is_async and sys.platform == "win32":
+        pytest.skip("a proactor loop may split the one write into several reads")
     regular_soon(monkeypatch)
     filler = b"".join(uat(1 + n / 10, f"x{n}", 1000, "T" * 2800) for n in range(3))
     late = uat(1.5, "late")
@@ -2680,3 +2683,63 @@ def test_the_start_list_has_one_limit_for_pm_and_dumpsys(
     assert "'dumpsys package packages' did not finish within the 0.6 seconds" in (
         warning
     )
+
+
+@pytest.mark.parametrize(
+    ("state", "requested", "after"),
+    [
+        ("not_requested", True, "timed_out"),
+        ("done", True, "timed_out"),
+        ("not_requested", False, "not_requested"),
+        ("failed", True, "failed"),
+    ],
+    ids=["pending", "done", "no-flush", "over"],
+)
+def test_a_list_command_cut_by_the_flush_budget_ends_the_flush(
+    state: str, *, requested: bool, after: str
+) -> None:
+    """When the command the flush budget limited times out, the flush is over,
+    pending or done, even if `perf_counter` still shows a little budget (an
+    asyncio timer can fire early); a flush that ended already keeps its end."""
+    marks = _marks.Marks("emu")
+    if requested:
+        marks.request = cast("Any", SimpleNamespace())
+    marks.state = cast("Any", state)
+    marks.budget_ran_out()
+    assert marks.state == after
+
+
+def test_the_list_limit_says_which_deadline_set_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit = cast("Any", None)
+    now = time.perf_counter()
+    seen: list[float] = []
+
+    def flush_left(_core: Any, _unit: Any, at: float) -> float:  # noqa: ANN401
+        seen.append(at)
+        return 5.0 - (at - now) - 0.000_001  # the flush ends just before the read
+
+    monkeypatch.setattr(_stream, "_list_time_left", flush_left)
+    limit, by_flush = _stream._list_limit_of(cast("Any", None), unit, now + 5.0)
+    # One clock reading for both deadlines: the flush, 1 us earlier, sets it.
+    assert by_flush is True
+    assert limit == pytest.approx(now + 5.0 - seen[0] - 0.000_001)
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit, _at: None)
+    limit, by_flush = _stream._list_limit_of(cast("Any", None), unit, now + 5.0)
+    assert by_flush is False
+    assert 4.0 < limit <= 5.0
+
+
+def test_a_stop_keeps_a_done_flush_from_turning_into_a_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marks = _marks.Marks("emu")
+    marks.state = "done"
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: 0.0)
+    for stopping, after in ((True, "done"), (False, "timed_out")):
+        marks.state = "done"
+        core = SimpleNamespace(outbox=SimpleNamespace(stopping=stopping))
+        unit = SimpleNamespace(marks=marks)
+        _stream._flush_overran(cast("Any", core), cast("Any", unit), "cut")
+        assert marks.state == after

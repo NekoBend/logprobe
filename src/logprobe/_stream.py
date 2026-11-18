@@ -638,7 +638,9 @@ def _list_wait_step(
     return None if wait == 0 else min(TICK, wait)
 
 
-def _list_time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
+def _list_time_left(
+    core: _CoreBase[Any], unit: _Unit, now: float | None = None
+) -> float | None:
     """The seconds until the device's nearest deadline, for a list while reading.
 
     As `_time_left`, except after the flush marker came back (``done``): the
@@ -649,15 +651,29 @@ def _list_time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
     request = marks.request
     if marks.state == "done" and request is not None:
         waited = core.outbox.backpressure().get(unit.serial, 0.0)
-        return request.left(unit.serial, perf_counter(), waited)
-    return _time_left(core, unit)
+        return request.left(unit.serial, perf_counter() if now is None else now, waited)
+    return _time_left(core, unit, now)
 
 
 def _list_limit(core: _CoreBase[Any], unit: _Unit, deadline: float) -> float:
     """The limit of the next list command while reading; zero or less: none left."""
-    limit = deadline - perf_counter()
-    left = _list_time_left(core, unit)
-    return limit if left is None else min(limit, left)
+    return _list_limit_of(core, unit, deadline)[0]
+
+
+def _list_limit_of(
+    core: _CoreBase[Any], unit: _Unit, deadline: float
+) -> tuple[float, bool]:
+    """The limit of the next list command, and whether the flush budget set it.
+
+    Both come from one reading of the clocks, so the flag says which deadline
+    the returned limit is.
+    """
+    now = perf_counter()
+    left = _list_time_left(core, unit, now)
+    limit = deadline - now
+    if left is not None and left < limit:
+        return left, True
+    return limit, False
 
 
 def _list_cancelled(
@@ -698,11 +714,11 @@ def _flush_overran(core: _CoreBase[Any], unit: _Unit, cause: str | None) -> None
     the flush ``done``: its lines are delivered at once.
     """
     marks = unit.marks
-    if cause is None or marks.state != "done":
-        return
+    if cause is None or marks.state != "done" or core.outbox.stopping:
+        return  # a stop that came meanwhile does not turn the flush into a timeout
     left = _list_time_left(core, unit)
-    if left is not None and left <= 0:
-        marks.overran()
+    if left is not None and left <= 0 and not core.outbox.stopping:
+        marks.overran()  # the stop is checked again: it may come while left is read
 
 
 def _set_boundary(unit: _Unit, result: ShellResult | None) -> None:
@@ -762,8 +778,10 @@ def _take_list(
     job = attributor.list_started(perf_counter())
     job.started = perf_counter()
     while not job.finished:
-        limit = (
-            deadline - perf_counter() if starting else _list_limit(core, unit, deadline)
+        limit, by_flush = (
+            (deadline - perf_counter(), False)
+            if starting
+            else _list_limit_of(core, unit, deadline)
         )
         if limit <= 0:
             job.fail(late)
@@ -777,6 +795,8 @@ def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
+            if by_flush and not core.outbox.stopping:  # a stop comes first
+                unit.marks.budget_ran_out()
             job.fail(late)
         except (LogprobeError, OSError) as error:
             if starting:
@@ -1509,7 +1529,9 @@ def _open_first(core: _Core, unit: _Unit, *, since: bool) -> ShellStream:
     return unit.conn
 
 
-def _time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
+def _time_left(
+    core: _CoreBase[Any], unit: _Unit, now: float | None = None
+) -> float | None:
     """The seconds until the device's nearest deadline, or None when it has none.
 
     The deadlines are the flush budget and the start marker's time (see
@@ -1521,7 +1543,7 @@ def _time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
     if core.flush is not None:
         marks.adopt(core.flush)
         waited = core.outbox.backpressure().get(unit.serial, 0.0)
-    return marks.nearest(perf_counter(), waited)
+    return marks.nearest(perf_counter() if now is None else now, waited)
 
 
 def _attempt_deadline(core: _CoreBase[Any], unit: _Unit) -> float | None:
