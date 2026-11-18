@@ -113,7 +113,7 @@ def test_logparser_subclass_without_its_members_cannot_be_instantiated() -> None
         pass
 
     with pytest.raises(TypeError, match="abstract"):
-        Incomplete()  # ty: ignore[call-non-callable]
+        Incomplete()  # ty: ignore[abstract-class-instantiation]
 
 
 @pytest.mark.parametrize("defined", ["parse", "logcat_format"])

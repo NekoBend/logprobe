@@ -690,7 +690,7 @@ def test_lifecycle_one_iteration_at_a_time(server: FakeAdbServer, mode: Mode) ->
     with pytest.raises(RuntimeError):
         s.items()
     assert next(first).message == "m0"
-    first.close()  # ty: ignore[unresolved-attribute]
+    first.close()  # ty: ignore[missing-attribute]
     second = s.items()
     with pytest.raises(RuntimeError):
         iter(s)
@@ -1625,11 +1625,11 @@ def test_lifecycle_ctrl_c_while_joining_kills_the_stream(
 
     def interrupting_join(timeout: float | None = None) -> None:
         # Ctrl-C arrives exactly while join() is waiting (once).
-        reader.join = real_join  # ty: ignore[invalid-assignment]
+        reader.join = real_join
         _thread.interrupt_main()
         real_join(timeout)
 
-    reader.join = interrupting_join  # ty: ignore[invalid-assignment]
+    reader.join = interrupting_join
     with real_sigint():
         began = time.monotonic()
         with pytest.raises(KeyboardInterrupt):
@@ -1839,7 +1839,7 @@ def test_a_new_iteration_carries_on_after_next_and_close(
     wait_until(lambda: s.summary.devices[0].entries == 10)
     it = iter(s)
     assert next(it).message == "m0"
-    it.close()  # ty: ignore[unresolved-attribute]
+    it.close()  # ty: ignore[missing-attribute]
     s.stop()
     rest = list(s.items())
     assert [e.message for e in rest if isinstance(e, LogEntry)] == names(1, 9)
@@ -2142,11 +2142,11 @@ def test_lifecycle_ctrl_c_in_a_bare_iteration_kills_the_stream(
 
     def interrupted_take(timeout: float | None = None) -> Sequence[object] | None:
         # Ctrl-C arrives exactly while the iteration waits for a chunk (once).
-        outbox.take = real_take  # ty: ignore[invalid-assignment]
+        outbox.take = real_take
         _thread.interrupt_main()
         return real_take(timeout)
 
-    outbox.take = interrupted_take  # ty: ignore[invalid-assignment]
+    outbox.take = interrupted_take
     with real_sigint():
         with pytest.raises(KeyboardInterrupt):
             next(iter(s))

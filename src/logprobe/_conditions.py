@@ -708,10 +708,10 @@ class _LevelField:
     def __lt__(self, level: LogLevel) -> Condition:
         return _LevelTest("lt", level)
 
-    def __eq__(self, level: object) -> Condition:  # ty: ignore[invalid-method-override]
+    def __eq__(self, level: object) -> Condition:  # ty: ignore[incompatible-method-override]
         return _LevelTest("eq", level)
 
-    def __ne__(self, level: object) -> Condition:  # ty: ignore[invalid-method-override]
+    def __ne__(self, level: object) -> Condition:  # ty: ignore[incompatible-method-override]
         return _LevelTest("ne", level)
 
     __hash__ = object.__hash__

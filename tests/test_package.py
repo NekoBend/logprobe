@@ -108,7 +108,7 @@ def test_the_asyncio_names_are_those_of_the_asyncio_stream() -> None:
 
 def test_an_unknown_name_is_an_attribute_error() -> None:
     with pytest.raises(AttributeError, match="has no attribute 'nope'"):
-        _ = logprobe.nope  # ty: ignore[unresolved-attribute]
+        _ = logprobe.nope  # ty: ignore[missing-attribute]
     assert not hasattr(logprobe, "nope")
 
 

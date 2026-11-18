@@ -534,7 +534,7 @@ class _Server(socketserver.ThreadingTCPServer):
             self.fake._connection_opened(request)
         super().process_request(request, client_address)
 
-    def shutdown_request(self, request: socket.socket) -> None:  # ty: ignore[invalid-method-override]
+    def shutdown_request(self, request: socket.socket) -> None:  # ty: ignore[incompatible-method-override]
         super().shutdown_request(request)
         self.fake._connection_closed(request)
 
