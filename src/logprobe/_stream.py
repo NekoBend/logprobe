@@ -2626,7 +2626,8 @@ def stream(
     those of an app id that no list ever names (perhaps an app installed only
     for another user, which is not verified) for as long as the stream runs. A
     WARNING says so, once per device for the first failed list, and once for
-    the device's first unattributed line, naming its cause. ``entries`` in
+    the device's first line that had to be judged without knowing its app,
+    naming its cause. ``entries`` in
     the summary counts the delivered entries. Lines of a watched app's
     isolated processes (such as a WebView renderer, app ids 90000 to 99999)
     are neither attributed to the app nor counted, and how an app

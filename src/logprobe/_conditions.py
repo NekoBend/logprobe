@@ -901,8 +901,9 @@ class Package(_Members):
       no list ever names (perhaps an app installed only for another user,
       which is not verified) are counted for as long as the stream runs. When
       the list taken for the read names the app id (another app got it after
-      the watched app was removed), the lines are judged as that app's and
-      not counted. A line's verdict depends on its app when the condition,
+      the watched app was removed), the lines are judged as that app's, and
+      the reuse alone does not count them; they are still counted when the
+      app id is one a watched package recently left. A line's verdict depends on its app when the condition,
       evaluated with the line's app unknown (three-valued: true, false or
       undecided), is undecided. A line that a term without packages excludes
       (``Tag("other")`` under ``Package(A) & Tag("keep")``) is not delivered

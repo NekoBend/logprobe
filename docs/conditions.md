@@ -337,7 +337,8 @@ Not promised:
   are judged as if no package owned them, and counted as above unless they
   look older than that clock. When that list names their app id (another app
   got it after the watched app was removed), they are judged as that app's
-  lines and not counted.
+  lines, and the reuse alone does not count them; they are still counted when
+  the app id is one a watched package recently left (see above).
 - A dump judges by the list read just before it.
 - A stream does not read a device while it takes the list at the start (at
   most 5 seconds) or for a read. An older logd may skip lines then, and
