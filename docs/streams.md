@@ -304,6 +304,12 @@ The reasons mean:
 Gaps are not filtered by the condition. `gap.to_dict()` returns a dict that
 `json.dumps` accepts, with `"schema": "logprobe.gap/1"`.
 
+Gaps are also logged on the `logprobe` logger, so that they are seen without
+`items()`: the first gap of each reason on a device is a WARNING, later ones of
+that reason are only counted, and when the device's read ends one WARNING gives
+those counts (none when there were no later gaps). A dump (`Device.dump`,
+`Device.adump`) logs its gaps the same way.
+
 ## Reconnect and resume
 
 When the connection to a device ends (the adb server restarted, the cable was

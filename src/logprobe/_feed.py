@@ -125,6 +125,7 @@ knows the apps decides.
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from collections import deque
@@ -135,12 +136,14 @@ from typing import TYPE_CHECKING, Final, Literal, NamedTuple, Protocol
 from ._framing import DEFAULT_MAX_LINE_BYTES, FramedLine, Framer, decode_line
 from ._parse import ParseContext, ThreadTimeLogParser
 from ._parse.fallback import is_divider, unparsed_entry
-from ._records import Gap
+from ._records import Gap, GapReason
 
 if TYPE_CHECKING:
     from ._conditions import Condition
     from ._entry import LogEntry
     from ._parse import LogParser
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "CHATTY_TAG",
@@ -321,6 +324,7 @@ class Feeder:
         "_ctx",
         "_cursor",
         "_framer",
+        "_gaps_later",
         "_hbytes",
         "_history",
         "_hlines",
@@ -379,6 +383,9 @@ class Feeder:
         self.arrived = False
         self.lines = self.entries = self.unparsed = self.truncated = 0
         self.duplicates = self.markers = self.gaps = self.lost = self.reconnects = 0
+        # The reasons of the gaps logged so far, each with the number of later
+        # gaps of that reason, which are only counted (`tell_later_gaps`).
+        self._gaps_later: dict[GapReason, int] = {}
 
     # -- what the feeder remembers ------------------------------------------------
 
@@ -498,6 +505,41 @@ class Feeder:
         self.gaps += 1
         if gap.lost is not None:
             self.lost += gap.lost
+        later = self._gaps_later
+        if gap.reason in later:
+            later[gap.reason] += 1
+            return
+        later[gap.reason] = 0
+        if gap.reason == "device_reported":
+            what = f"the device dropped {gap.lost} lines"
+        else:
+            what = f"lines may be missing or repeated after a reconnect ({gap.cause})"
+        _LOG.warning(
+            "%s: a gap in the log (%s): %s; later gaps of this kind are counted "
+            "and told once when the read ends",
+            self.serial,
+            gap.reason,
+            what,
+        )
+
+    def tell_later_gaps(self) -> None:
+        """Log, in one WARNING, how many gaps came after the first of each reason.
+
+        Called when the device's read ends; nothing is logged when there were
+        none. The counts start again from zero.
+        """
+        later = self._gaps_later
+        counts = [f"{reason} {n}" for reason, n in sorted(later.items()) if n]
+        if not counts:
+            return
+        _LOG.warning(
+            "%s: %d more gaps in the log after the first of each kind (%s)",
+            self.serial,
+            sum(later.values()),
+            ", ".join(counts),
+        )
+        for reason in later:
+            later[reason] = 0
 
     def _process(self, framed: list[FramedLine], nbytes: int) -> list[Chunk]:  # noqa: PLR0912, PLR0915  (one flat loop: the per-line hot path)
         if not framed:

@@ -177,6 +177,7 @@ class Collector:
                 },
             )
         self._collect(self._feeder.finish())
+        self._feeder.tell_later_gaps()
         return self._entries
 
     def _collect(self, chunks: list[Chunk]) -> None:

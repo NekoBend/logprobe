@@ -394,18 +394,25 @@ def test_an_older_logd_reader_closes_itself_resumes_and_reports_the_lost_lines(
     assert (summary.reconnects, summary.gaps) == (1, 1)
     assert not s.summary.complete
     assert len(records(server, "getprop")) == 1  # never again after a reconnect
-    # Arming the check on an older logd logs nothing; only the stall is logged.
-    logged = [
+    # Arming the check on an older logd logs nothing; the stall and its gap are
+    # logged (the gap by the feeder, before or after the stall's line).
+    logged = sorted(
         (r.levelname, r.getMessage())
         for r in caplog.records
         if r.name.startswith("logprobe")
-    ]
+    )
     assert logged == [
+        (
+            "WARNING",
+            "a: a gap in the log (ring_rotated): lines may be missing or repeated "
+            "after a reconnect (stalled); later gaps of this kind are counted and "
+            "told once when the read ends",
+        ),
         (
             "WARNING",
             f"the reader of a closed its logcat connection after waiting {STALL:g} s "
             "for room in the queue; it reconnects once the queue is half empty",
-        )
+        ),
     ]
 
 

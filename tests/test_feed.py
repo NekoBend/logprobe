@@ -947,3 +947,36 @@ class TestChattyNotice:
     def test_the_count_ignores_trailing_blanks_and_one_line_wording(self):
         assert chatty_loss("uid=1000(system) expire 1 line ") == 1
         assert chatty_loss("uid=1000 /system/bin/lmkd expire 12 lines") == 12
+
+
+class TestGapLogging:
+    """The first gap of each reason is a WARNING; later ones are told at the end."""
+
+    def test_the_first_gap_of_a_reason_warns_and_later_ones_are_counted(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        feeder = Feeder("s1")
+        with caplog.at_level("WARNING", logger="logprobe"):
+            feeder.feed(data(line(0, "a"), notice(5), notice(2), notice(4)))
+        warnings = [r.getMessage() for r in caplog.records]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("s1: a gap in the log (device_reported)")
+        assert "dropped 5 lines" in warnings[0]
+        assert (feeder.gaps, feeder.lost) == (3, 11)
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="logprobe"):
+            feeder.tell_later_gaps()
+            feeder.tell_later_gaps()  # told once: the counts start again
+        assert [r.getMessage() for r in caplog.records] == [
+            "s1: 2 more gaps in the log after the first of each kind "
+            "(device_reported 2)"
+        ]
+
+    def test_nothing_is_told_at_the_end_without_later_gaps(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        feeder = Feeder("s1")
+        with caplog.at_level("WARNING", logger="logprobe"):
+            feeder.feed(data(line(0, "a"), notice(5)))
+            feeder.tell_later_gaps()
+        assert len(caplog.records) == 1  # the first gap only
