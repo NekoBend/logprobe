@@ -134,6 +134,7 @@ from ._stream import (
     _feed_output,
     _finish,
     _first_argv,
+    _flush_limits,
     _flush_overran,
     _idle_ended,
     _judge_logd,
@@ -409,6 +410,7 @@ async def _take_list(
         if limit <= 0:
             job.fail(late)
             break
+        by_flush = not starting and _flush_limits(core, unit, deadline)
         try:
             result = await _run_command(core, unit, job.argv, limit, cancelled)
         except _adb.Cancelled:
@@ -418,6 +420,7 @@ async def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
+            unit.flush_cut = unit.flush_cut or by_flush
             job.fail(late)
         except (LogprobeError, OSError) as error:
             if starting:

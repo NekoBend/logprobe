@@ -170,6 +170,7 @@ class _Unit:
         "ended_at",
         "error",
         "feeder",
+        "flush_cut",
         "left_listing",
         "listing",
         "marks",
@@ -211,6 +212,9 @@ class _Unit:
             else None
         )
         self.delivered = 0
+        # A list command for a read was cut by its time limit while the flush
+        # budget, not the read's own deadline, set that limit.
+        self.flush_cut = False
         # The regular package list while it runs beside the reader.
         self.listing: _Listing | None = None
         # A regular list the reader told to give up when it ended; its thread
@@ -698,18 +702,22 @@ def _flush_overran(core: _CoreBase[Any], unit: _Unit, cause: str | None) -> None
     the flush ``done``: its lines are delivered at once.
     """
     marks = unit.marks
+    cut, unit.flush_cut = unit.flush_cut, False
     if cause is None or marks.state != "done":
         return
     left = _list_time_left(core, unit)
-    if left is not None and left <= _TIMER_SLACK:
+    # ``cut``: the command ended at the budget's limit. An asyncio timer can
+    # fire a little before the budget runs out by `perf_counter` (its clock
+    # moves in steps of about 16 ms on Windows), so ``left`` may still be above
+    # zero then.
+    if cut or (left is not None and left <= 0):
         marks.overran()
 
 
-# A command cut at a time limit can end a little before that limit by the
-# `perf_counter` clock: the asyncio loop's timers follow the event loop's
-# clock, which on Windows with Python 3.12 moves in steps of about 16 ms. A
-# flush budget left within this slack counts as used up.
-_TIMER_SLACK = 0.05
+def _flush_limits(core: _CoreBase[Any], unit: _Unit, deadline: float) -> bool:
+    """True when the flush budget, not ``deadline``, limits the next list command."""
+    left = _list_time_left(core, unit)
+    return left is not None and left < deadline - perf_counter()
 
 
 def _set_boundary(unit: _Unit, result: ShellResult | None) -> None:
@@ -775,6 +783,7 @@ def _take_list(
         if limit <= 0:
             job.fail(late)
             break
+        by_flush = not starting and _flush_limits(core, unit, deadline)
         try:
             result = unit.device._run_command(job.argv, limit, cancelled)
         except _adb.Cancelled:
@@ -784,6 +793,7 @@ def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
+            unit.flush_cut = unit.flush_cut or by_flush
             job.fail(late)
         except (LogprobeError, OSError) as error:
             if starting:

@@ -2685,17 +2685,27 @@ def test_the_start_list_has_one_limit_for_pm_and_dumpsys(
     )
 
 
-@pytest.mark.parametrize(("left", "overran"), [(0.01, True), (0.0, True), (0.2, False)])
-def test_a_flush_whose_budget_is_left_within_the_timer_slack_counts_as_used_up(
-    monkeypatch: pytest.MonkeyPatch, left: float, *, overran: bool
+@pytest.mark.parametrize(
+    ("cut", "left", "overran"),
+    [
+        (True, 0.01, True),
+        (False, 0.01, False),
+        (False, 0.0, True),
+        (False, None, False),
+    ],
+    ids=["cut-by-the-budget", "gave-up-early", "budget-used-up", "no-budget"],
+)
+def test_a_flush_ends_timed_out_when_the_budget_cut_the_list(
+    monkeypatch: pytest.MonkeyPatch, *, cut: bool, left: float | None, overran: bool
 ) -> None:
-    """A list command cut at the flush budget can end a few milliseconds early
-    by `perf_counter` (an asyncio timer on Windows follows a coarser clock);
-    what is left within that slack still ends the flush as timed_out."""
+    """A list command cut by the flush budget's limit ends the flush as
+    timed_out even when ``perf_counter`` still shows a little budget (an
+    asyncio timer can fire early); a read that gave up before any command
+    with budget left keeps the flush done."""
     calls: list[str] = []
     marks = SimpleNamespace(state="done", overran=lambda: calls.append("overran"))
+    unit = SimpleNamespace(marks=marks, flush_cut=cut)
     monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: left)
-    _stream._flush_overran(
-        cast("Any", None), cast("Any", SimpleNamespace(marks=marks)), "cut"
-    )
+    _stream._flush_overran(cast("Any", None), cast("Any", unit), "cut")
     assert (calls == ["overran"]) is overran
+    assert unit.flush_cut is False
