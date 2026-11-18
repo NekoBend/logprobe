@@ -89,9 +89,11 @@ from ._adb import TICK
 from ._aoutbox import AsyncOutbox
 from ._errors import LogprobeError
 from ._marks import Act, FlushRequest, Phase, Step
+from ._outbox import STALLED
 from ._records import Gap, StreamSummary
-from ._resume import Decision, ReconnectPolicy, ResumeCheck
+from ._resume import Decision, EndKind, ReconnectPolicy, ResumeCheck
 from ._stream import (
+    _SDK_COMMAND,
     _arm_start_marker,
     _attempt_cancelled,
     _attempt_failed,
@@ -109,6 +111,7 @@ from ._stream import (
     _finish,
     _first_argv,
     _idle_ended,
+    _judge_logd,
     _marker_command,
     _marking_step,
     _next_attempt,
@@ -200,13 +203,23 @@ class _ACore(_CoreBase[AsyncOutbox]):
 class _ARun(_RunBase):
     """One connection of an asyncio reader."""
 
-    __slots__ = ("stream",)
+    __slots__ = ("decoded", "left", "stream")
 
     def __init__(
         self, stream: AsyncShellStream, serial: str, check: ResumeCheck | None
     ) -> None:
         super().__init__(serial, check)
         self.stream = stream
+        # With a stall limit: the seconds of it the waits for room since the
+        # last network read have left, and ``stream.decoded()`` after the last
+        # batch (those events need no new network read).
+        self.left: float | None = None
+        self.decoded = 0
+
+    def stall(self) -> None:
+        """Close the connection: the reader waited too long for room."""
+        self.stalled = True
+        self.stream.close()
 
 
 # -- waiting for the client ---------------------------------------------------------
@@ -340,6 +353,23 @@ async def gather(stream: AsyncShellStream, limit: float | None) -> Batch:
     return batch
 
 
+async def _queue_read(
+    core: _ACore, unit: _Unit, run: _ARun, chunks: list[Chunk], batch: Batch | None
+) -> None:
+    """Queue what one read yielded (see the blocking `_queue_read`).
+
+    ``batch`` is the batch the chunks were fed from; None for chunks that no
+    read brought (the feeder's end of a resume check).
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    if unit.stall_after is None:
+        await _enqueue(core, unit, chunks)
+    else:
+        await _enqueue_limited(core, unit, run, chunks, batch)
+
+
 async def _enqueue(core: _ACore, unit: _Unit, chunks: list[Chunk]) -> None:
     """Queue the chunks' segments that the device's markers let through.
 
@@ -356,6 +386,84 @@ async def _enqueue(core: _ACore, unit: _Unit, chunks: list[Chunk]) -> None:
         if waited is None:
             await _marking(core, unit)
             await outbox.put(segments, charge, unit.serial)
+
+
+async def _enqueue_limited(
+    core: _ACore,
+    unit: _Unit,
+    run: _ARun,
+    chunks: list[Chunk],
+    batch: Batch | None,
+) -> None:
+    """The blocking `_enqueue_limited`: close the connection after waiting too long.
+
+    The limit holds for the waits since the stream last received output from
+    the device, as on the blocking stream, not for each batch: the batches the
+    stream decoded from one network read share what is left of it, and only a
+    new read starts it again. A batch holds output of a new read exactly when
+    it has more events than the stream had decoded after the batch before.
+    Chunks that come from no batch (``batch`` None) get the whole limit, as
+    on the blocking stream. After a stall the reader queues the rest of the
+    read too (`_queue_decoded`).
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    outbox = core.outbox
+    serial = unit.serial
+    if batch is None or len(batch.out) + len(batch.err) > run.decoded:
+        run.left = unit.stall_after  # output of a new read: the whole limit
+    run.decoded = run.stream.decoded()
+    left = run.left
+    for segments, charge in _routed(unit, chunks):
+        began = perf_counter()
+        waited = await outbox.put(
+            segments, charge, serial, interruptible=True, limit=left
+        )
+        if waited is None:
+            if left is not None:
+                left -= perf_counter() - began
+            await _marking(core, unit)
+            waited = await outbox.put(segments, charge, serial, limit=left)
+        if waited is STALLED:
+            run.stall()
+            left = None
+            await outbox.put(segments, charge, serial)
+        elif left is not None:
+            left -= waited
+    run.left = left
+
+
+async def _queue_decoded(core: _ACore, unit: _Unit, run: _ARun) -> None:
+    """After a stall: feed and queue, without a limit, what the stream decoded.
+
+    The connection is closed already, so logd no longer holds lines back; the
+    events of the last network read that no batch took yet are still in the
+    stream, and closing does not drop them. They go in like the rest of a
+    receive on the blocking stream, so the feeder counts their lines and the
+    resume starts after them. What the device sent after that read is lost
+    with the connection, as on the blocking stream.
+
+    Raises:
+        LogprobeError: The shell protocol broke after those events (they were
+            queued first).
+    """
+    stream = run.stream
+    rest = Batch()
+    broken: LogprobeError | None = None
+    try:
+        # The stream is closed: this takes what it holds and never waits.
+        while (event := await stream.read_part()) is not None:
+            rest.add(event)
+    except LogprobeError as error:
+        broken = error
+    if rest:
+        err = b"".join(rest.err)
+        out = b"".join(rest.out)
+        await _enqueue(core, unit, _feed_output(unit, run, err, out))
+    run.exit_status = stream.exit_status
+    if broken is not None:
+        raise broken
 
 
 async def _read(core: _ACore, unit: _Unit, run: _ARun) -> None:
@@ -392,12 +500,17 @@ async def _read(core: _ACore, unit: _Unit, run: _ARun) -> None:
         if check is not None and batch:
             check.received()
         err = b"".join(batch.err)
-        await _enqueue(core, unit, _feed_output(unit, run, err, b"".join(batch.out)))
+        out = b"".join(batch.out)
+        chunks = _feed_output(unit, run, err, out)
+        await _queue_read(core, unit, run, chunks, batch)
         if batch.ended:  # whatever follows the exit packet was ignored
             run.exit_status = stream.exit_status
             return
         if batch.broken is not None:  # the output before it was queued already
             raise batch.broken
+        if run.stalled:
+            await _queue_decoded(core, unit, run)
+            return
         if outbox.stopping:
             return
 
@@ -408,8 +521,8 @@ async def _quiet(core: _ACore, unit: _Unit, run: _ARun, waited: float) -> bool:
     if outbox.stopping:
         return True
     if _idle_ended(run, waited):
-        await _enqueue(core, unit, unit.feeder.end_check())
-        return outbox.stopping
+        await _queue_read(core, unit, run, unit.feeder.end_check(), None)
+        return outbox.stopping or run.stalled
     return False
 
 
@@ -456,11 +569,30 @@ async def _one_shot(core: _ACore, unit: _Unit, argv: list[str]) -> ShellResult:
     return _succeeded(unit, argv, result)
 
 
-async def _prepare(core: _ACore, unit: _Unit, *, since: bool) -> None:
+async def _check_logd(core: _ACore, unit: _Unit) -> None:
+    """Read the device's API level and set its stall limit (see the blocking one).
+
+    Raises:
+        LogprobeError: The device or the adb server failed.
+    """
+    try:
+        result = await _run_command(
+            core, unit, list(_SDK_COMMAND), _marks.COMMAND_LIMIT
+        )
+    except TimeoutError:
+        result = None
+    _judge_logd(unit, result)
+
+
+async def _prepare(
+    core: _ACore, unit: _Unit, *, since: bool, detect_skips: bool
+) -> None:
     """Step one of the start for one device: the checks and the start marker."""
     await _cancellable(
         arequire_shell_v2(unit.device._address, unit.serial), core.cancelled
     )
+    if detect_skips:
+        await _check_logd(core, unit)
     if since:
         argv = ["date", "+%s"]
         result = await _one_shot(core, unit, argv)
@@ -500,7 +632,8 @@ async def _serve(core: _ACore, unit: _AUnit) -> LogprobeError | None:
     """Read one device across its connections; return the error that ended it.
 
     The flow of the blocking ``_serve``: read a connection, decide from how it
-    ended whether to stop or to reconnect, wait, and open the next one.
+    ended whether to stop or to reconnect (after a stall, once the queue is half
+    empty), wait, and open the next one.
     """
     policy = ReconnectPolicy(unit.reconnect)
     stream = unit.stream
@@ -516,6 +649,10 @@ async def _serve(core: _ACore, unit: _AUnit) -> LogprobeError | None:
         ended = _connection_ended(core, unit, run, policy, first=first)
         if not isinstance(ended, _Retry):
             return ended
+        if ended.kind is EndKind.STALLED and not await core.outbox.wait_half_empty(
+            unit.serial
+        ):
+            return None
         decision = ended.decision
         while True:
             if not await _pause(core, unit, decision.delay):
@@ -686,11 +823,14 @@ class AsyncLogStream:
         buffer_lines: int,
         buffer_bytes: int,
         since: Literal["now"] | None = None,
+        *,
+        detect_skips: bool = False,
     ) -> None:
         units = [_AUnit(device, condition, reconnect) for device in devices]
         self._units = units
         self._core = _ACore(units, AsyncOutbox(buffer_lines, buffer_bytes))
         self._since = since
+        self._detect_skips = detect_skips
         self._phase = _Phase.NEW
         self._loop: asyncio.AbstractEventLoop | None = None
         self.serials: tuple[str, ...] = tuple(unit.serial for unit in units)
@@ -703,12 +843,13 @@ class AsyncLogStream:
         """Check the devices, open every connection and start the readers.
 
         The same three steps as `LogStream.start`: each device is prepared in
-        turn (``shell_v2`` check and, with ``since="now"``, the device clock and
-        the start marker), then all logcat connections are opened back to back,
-        then all reader tasks start (all or none). The readers wait for the
-        start marker, not ``start()``. When `stop` or `kill` is called, before
-        or during the start, nothing is left open and no reader starts; the
-        stream then ends at once without an error.
+        turn (``shell_v2`` check, with ``detect_skips`` the device's API level,
+        and with ``since="now"`` the device clock and the start marker), then
+        all logcat connections are opened back to back, then all reader tasks
+        start (all or none). The readers wait for the start marker, not
+        ``start()``. When `stop` or `kill` is called, before or during the
+        start, nothing is left open and no reader starts; the stream then ends
+        at once without an error.
 
         If the task that awaits ``start()`` is cancelled, everything that was
         opened is closed and the stream is killed: it counts as ended early
@@ -740,7 +881,9 @@ class AsyncLogStream:
             if core.outbox.stopping:
                 raise _adb.Cancelled
             for working in self._units:
-                await _prepare(core, working, since=since)
+                await _prepare(
+                    core, working, since=since, detect_skips=self._detect_skips
+                )
             for working in self._units:
                 opened.append(await _open_first(core, working, since=since))
             if core.outbox.stopping:
@@ -1015,6 +1158,7 @@ def astream(
     pid: int | list[int] | tuple[int, ...] | None = None,
     since: Literal["now"] | None = None,
     reconnect: float = 60.0,
+    detect_skips: bool = False,
     buffer_lines: int = 10_000,
     buffer_bytes: int = 4 * 1024 * 1024,
 ) -> AsyncLogStream:
@@ -1052,7 +1196,14 @@ def astream(
         reconnect=reconnect,
         buffer_lines=buffer_lines,
         buffer_bytes=buffer_bytes,
+        detect_skips=detect_skips,
     )
     return AsyncLogStream(
-        _devices(devices), condition, budget, buffer_lines, buffer_bytes, since
+        _devices(devices),
+        condition,
+        budget,
+        buffer_lines,
+        buffer_bytes,
+        since,
+        detect_skips=detect_skips,
     )

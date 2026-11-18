@@ -95,10 +95,15 @@ def open_stream(
     reconnect: float = 0.0,
     since: Literal["now"] | None = None,
     buffer_lines: int = 10_000,
+    detect_skips: bool = False,
 ) -> AsyncLogStream:
     devices = attach(server, *(serials or ("a",)))
     return logprobe.astream(
-        devices, reconnect=reconnect, since=since, buffer_lines=buffer_lines
+        devices,
+        reconnect=reconnect,
+        since=since,
+        buffer_lines=buffer_lines,
+        detect_skips=detect_skips,
     )
 
 
@@ -247,7 +252,7 @@ def test_a_slow_consumer_loses_nothing_and_the_reader_waits_for_room(
 
 
 @pytest.mark.parametrize(
-    "step", ["features", "date", "marker", "logcat", "second_logcat"]
+    "step", ["features", "getprop", "date", "marker", "logcat", "second_logcat"]
 )
 def test_a_start_that_is_cancelled_at_any_step_leaves_nothing_open(
     server: FakeAdbServer, step: str
@@ -265,13 +270,18 @@ def test_a_start_that_is_cancelled_at_any_step_leaves_nothing_open(
     elif step == "second_logcat":
         server.add_sequence("logcat", hold("a"), serial="a")
         server.silent_prefix = "host:transport:b"
+    elif step == "getprop":
+        server.oneoff["getprop"] = ShellScript(steps=[Wait("getprop")])
     elif step == "date":
         server.oneoff["date +%s"] = ShellScript(steps=[Wait("date")])
     else:
         server.answer("date +%s", b"1000\n")
         server.oneoff["log -t"] = ShellScript(steps=[Wait("marker")])
     s = open_stream(
-        server, *serials, since="now" if step in {"date", "marker"} else None
+        server,
+        *serials,
+        since="now" if step in {"date", "marker"} else None,
+        detect_skips=step == "getprop",
     )
 
     async def scenario() -> None:
@@ -744,6 +754,86 @@ def test_no_thread_is_started_by_a_stream_with_a_reconnect_and_a_flush(
     run(scenario)
     assert seen <= before
     assert own_threads() == before
+
+
+def test_no_thread_is_started_by_a_stream_that_stalls_and_resumes(
+    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reading the API level, giving up on the full queue, waiting for it to be
+    half empty and reconnecting all run on the loop.
+
+    Starting a thread through ``threading.Thread.start``, ``run_in_executor``
+    or ``asyncio.to_thread`` is recorded while the stream runs, so a thread
+    that ends at once is seen too. The consumer takes one line at a time and
+    takes the second only once the reader waits for the queue to be half
+    empty, so that wait happens while the starts are recorded.
+    """
+    monkeypatch.setattr(_resume, "STALL_AFTER", 0.1)
+    monkeypatch.setattr(feed_module, "CHUNK_ENTRIES", 1)  # one line a chunk
+    server.answer("getprop ro.build.version.sdk", b"24\n")
+    server.add_sequence(
+        "logcat",
+        ShellScript(
+            steps=[
+                ("stdout", at(0, "m0") + at(1, "m1")),
+                Wait("full"),
+                ("stdout", at(2, "m2")),
+                Wait("held", live=True),
+            ]
+        ),
+        staying(("stdout", at(1, "m1") + at(2, "m2") + at(3, "m3")), t=expect_t(2)),
+    )
+    started: list[str] = []
+    thread_start = threading.Thread.start
+    run_in_executor = asyncio.BaseEventLoop.run_in_executor
+    to_thread = asyncio.to_thread
+
+    def recorded_start(self: threading.Thread) -> None:
+        # The fake server's handler threads come and go with its connections.
+        if "process_request" not in self.name:
+            started.append(f"Thread.start: {self.name}")
+        thread_start(self)
+
+    def recorded_run_in_executor(self: Any, *args: Any) -> Any:  # noqa: ANN401
+        started.append("run_in_executor")
+        return run_in_executor(self, *args)
+
+    async def recorded_to_thread(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        started.append("to_thread")
+        return await to_thread(*args, **kwargs)
+
+    monkeypatch.setattr(threading.Thread, "start", recorded_start)
+    monkeypatch.setattr(
+        asyncio.BaseEventLoop, "run_in_executor", recorded_run_in_executor
+    )
+    monkeypatch.setattr(asyncio, "to_thread", recorded_to_thread)
+    s = open_stream(server, reconnect=60.0, buffer_lines=2, detect_skips=True)
+
+    def logcat_connections() -> int:
+        return len([r for r in list(server.records) if "logcat" in r.command])
+
+    async def scenario() -> None:
+        async with s:
+            outbox = s._core.outbox
+            await until(lambda: outbox.pending_lines == 2)  # m0 and m1 fill it
+            server.release("full")
+            await until(lambda: server.wait_done(1, 0))  # the reader gave up on m2
+            entries = aiter(s)
+            got = [(await anext(entries)).message]  # m0: m2 goes in, 2 lines left
+            await until(lambda: outbox._draining == 1)  # the reader waits for half
+            waited = outbox.backpressure()["a"]
+            await until(lambda: outbox.backpressure()["a"] > waited + 0.05)
+            assert logcat_connections() == 1  # still waiting, not reconnected
+            async for entry in entries:  # m1 leaves 1 line: half, it reconnects
+                got.append(entry.message)
+                if len(got) == 4:
+                    s.stop()
+            assert got == ["m0", "m1", "m2", "m3"]
+        assert s.summary.devices[0].reconnects == 1
+        assert logcat_connections() == 2
+
+    run(scenario)
+    assert started == []
 
 
 def test_the_stream_is_not_iterated_while_another_iteration_is_open(

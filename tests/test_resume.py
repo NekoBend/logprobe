@@ -16,6 +16,7 @@ from logprobe._resume import (
     QUICK_LIMIT,
     RESUME_IDLE,
     STABLE_AFTER,
+    STALL_AFTER,
     Decision,
     EndKind,
     ReconnectPolicy,
@@ -26,7 +27,10 @@ from logprobe._resume import (
     cause_of,
     classify_end,
     end_error,
+    parse_sdk,
     plan_resume,
+    skips_silently,
+    stall_limit,
     t_arg,
 )
 
@@ -137,9 +141,27 @@ class TestClassifyEnd:
             is EndKind.STOPPED
         )
 
-    @pytest.mark.parametrize("status", [None, 0, 1, 143])
-    def test_stalled_wins_over_the_status(self, status):
-        assert kind(status, stalled=True) is EndKind.STALLED
+    def test_a_close_by_the_reader_without_an_exit_status_is_stalled(self):
+        assert kind(None, stalled=True) is EndKind.STALLED
+
+    @pytest.mark.parametrize(
+        ("status", "stderr", "expected"),
+        [
+            (2, "", EndKind.FAILED),
+            (1, API24_EOF, EndKind.RELEASED),
+            (0, "", EndKind.ENDED),
+            (143, "", EndKind.ENDED),
+        ],
+    )
+    def test_an_exit_status_that_came_before_the_reader_closed_wins(
+        self, status, stderr, expected
+    ):
+        """logcat ended on its own in the read the reader gave up on."""
+        assert kind(status, stderr, stalled=True) is expected
+        early = {"output_seen": False, "first_connection": True}
+        assert kind(status, stderr, stalled=True, **early) is kind(
+            status, stderr, **early
+        )
 
     def test_causes(self):
         assert cause_of(EndKind.RELEASED) == "released"
@@ -868,3 +890,68 @@ def test_a_timeout_attempt_ends_as_adb_error_with_the_timeout_as_cause():
     assert error is not None
     assert error.code == "adb_error"
     assert error.__cause__ is attempt
+
+
+# --- older logd versions --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sdk", "skips"),
+    [
+        (None, True),
+        (23, True),
+        (24, True),
+        (25, True),
+        (26, False),
+        (27, False),
+        (28, False),
+        (29, False),
+        (30, True),
+        (31, False),
+        (32, False),
+        (33, False),
+        (34, False),
+        (35, False),
+        (36, False),
+        (37, False),
+        (40, False),
+    ],
+)
+def test_old_logd_rule_matches_the_measured_levels(sdk, skips):
+    """24 and 30 were seen to skip lines and 26-29, 31, 32, 36 to cut a reader off;
+    an unreadable level is treated as one that skips, and only those get a limit.
+    """
+    assert skips_silently(sdk) is skips
+    assert stall_limit(sdk) == (STALL_AFTER if skips else None)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "sdk"),
+    [
+        (b"24\n", 24),
+        (b"30\r\n", 30),
+        (b" 36 \n", 36),
+        (b"", None),
+        (b"\n", None),
+        (b"abc\n", None),
+        (b"24 25\n", None),
+        (b"-1\n", None),
+        (b"+24\n", None),
+        (b"2.4\n", None),
+        ("\uff12\uff14\n".encode(), None),  # full-width digits
+        ("\u0662\u0664".encode(), None),  # Arabic-Indic digits
+        (b"1234\n", 1234),
+        (b"12345\n", None),  # more digits than an API level has
+        (b"1" * 5000 + b"\n", None),  # more than int() converts
+    ],
+)
+def test_api_level_text_is_parsed_or_unreadable(stdout, sdk):
+    assert parse_sdk(stdout) == sdk
+
+
+def test_the_stall_limit_is_read_when_asked(monkeypatch):
+    """Tests and the reader both see a changed limit: it is looked up at call time."""
+    from logprobe import _resume
+
+    monkeypatch.setattr(_resume, "STALL_AFTER", 0.25)
+    assert stall_limit(24) == 0.25

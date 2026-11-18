@@ -89,6 +89,7 @@ only on `logprobe.stream`:
 | `since` | `None` | `None` starts with the backlog the device still holds; `"now"` skips it. |
 | `on_entry` | `None` | A callback for every entry, called on a consumer thread (blocking API only). |
 | `reconnect` | `60.0` | Reconnect budget in seconds, per device. See [Reconnect and resume](#reconnect-and-resume). |
+| `detect_skips` | `False` | Also detect lines that an older logd skips without notice when the consumer falls behind. See [Detect skipped lines with `detect_skips`](#detect-skipped-lines-with-detect_skips). |
 | `buffer_lines` | `10_000` | Most lines queued for the consumer, over all devices (at least 1). |
 | `buffer_bytes` | `4 * 1024 * 1024` | The same limit in bytes of logcat output (at least 65536). |
 
@@ -104,7 +105,8 @@ Wrong arguments fail when the stream is created: `TypeError` for a wrong type
 `package=` shortcut.
 
 `start()` runs on the calling thread. It checks each device in turn (the device
-must support the `shell_v2` feature, otherwise `adb_error`), opens one logcat
+must support the `shell_v2` feature, otherwise `adb_error`; with `detect_skips`
+it also reads the device's API level), opens one logcat
 connection per device, and then starts one reader thread per device, plus a
 consumer thread when `on_entry` is given. When a step fails, everything that
 was opened is closed and the `LogprobeError` is raised. A stream is used once:
@@ -273,7 +275,7 @@ A `Gap` has these fields:
 | --- | --- |
 | `serial` | The device the gap belongs to. |
 | `reason` | `ring_rotated`, `continuity_unknown` or `device_reported` (below). |
-| `cause` | `released` (logd cut the reader off), `disconnected` (the connection was lost, or logcat ended or failed) or `notice` (for `device_reported`). |
+| `cause` | `released` (logd cut the reader off), `disconnected` (the connection was lost, or logcat ended or failed), `stalled` (the reader closed the connection itself, see [`detect_skips`](#detect-skipped-lines-with-detect_skips)) or `notice` (for `device_reported`). |
 | `detected_at` | Host clock, aware UTC: when the `chatty` notice was read, or, for the other reasons, when the reconnect was planned (before the new connection opened). |
 | `start_at` | Roughly where in the device's time the gap lies; a hint, not a bound. `None` when unknown. |
 | `lost` | The number of lost lines when the device says so, else `None`. |
@@ -290,7 +292,6 @@ The reasons mean:
   lines. `lost` holds the count. The notice line is also delivered as an entry
   (if it matches the condition), and the gap comes right before it.
 
-The `cause` type also lists `stalled`, but the stream never produces it.
 Gaps are not filtered by the condition. `gap.to_dict()` returns a dict that
 `json.dumps` accepts, with `"schema": "logprobe.gap/1"`.
 
@@ -309,7 +310,8 @@ How a connection ended decides what happens next:
 | The connection | What the stream does | Error when it gives up |
 | --- | --- | --- |
 | was cut off by logd (exit status 1 and logcat's "unexpected EOF" message) | Reconnects at once. This is not a failure, unless three connections in a row each end within one second of opening. | `logcat_failed` |
-| closed without an exit status | Counts a failure and retries. | `device_lost` |
+| was closed by the reader itself after waiting a whole second for room (`detect_skips`), before an exit status arrived | Waits until the queue is at most half full, then reconnects. This is not a failure and never counts as a quick end. | none |
+| was lost: closed without an exit status | Counts a failure and retries. | `device_lost` |
 | ended with exit status 0, or 128 or higher (a signal) | Counts a failure and retries. The first such retry after the start, and the first after each stable connection, is immediate. | `device_lost` |
 | failed with another status before any standard output, on the first connection | Ends the stream at once. | `logcat_failed` |
 | failed with another non-zero status | Counts a failure and retries. | `logcat_failed` |
@@ -329,11 +331,16 @@ device was not found, offline or unauthorized, and `adb_error` for anything
 else (for example a timeout or a broken connection).
 
 - `reconnect=math.inf` never runs out of budget. A first connection that
-  fails before any standard output (the fourth row of the table), a late start
+  fails before any standard output (see the table), a late start
   marker or a broken shell protocol still end the stream.
 - `reconnect=0` does not recover a lost connection, an ended logcat or a failed
   logcat. Connections that logd cut off are still resumed, and three in a row
   that each end within one second end the stream with `logcat_failed`.
+  Connections the reader closed itself (`detect_skips`) before an exit status
+  arrived are always resumed. When a read holds both the stall and logcat's
+  exit status, the exit status decides, as in the table.
+- When different failures share one budget, the failure that finds the budget
+  used up decides the error.
 - Reconnecting never starts the adb server.
 
 The resume check keeps the most recent lines (up to 2 MiB or 20,000 lines) to
@@ -346,7 +353,10 @@ some losses go unreported:
   before the disconnect, and deletions in the middle of a ring that remove only
   unread lines (logd pruning a chatty source, another tool running
   `logcat -c`).
-- Lines an older logd skipped without a notice while the reader was slow.
+- Lines an older logd skipped without a notice while the reader was slow: all
+  of them without `detect_skips`; with it, those skipped before the reader had
+  waited a whole second for room (see
+  [Detect skipped lines](#detect-skipped-lines-with-detect_skips)).
 - Lines that do not parse: a replayed one is delivered twice without a gap.
 
 It may also report too much: `ring_rotated` when the ring dropped only lines
@@ -430,7 +440,61 @@ After a stop, the limits no longer apply.
 While a reader waits, it does not read its connection, but the device keeps
 logging. If the reader falls far behind, the device's logd may cut it off or
 skip lines. When logd cuts it off, the stream reconnects and resumes as
-described above, and reports what it can detect as a gap.
+described above, and reports what it can detect as a gap. Skipped lines are
+detected, in part, only with `detect_skips` (below).
+
+## Detect skipped lines with `detect_skips`
+
+On API levels 25 and below and on 30, logd may skip lines of a reader that does
+not keep up, without any notice, instead of cutting it off. Without
+`detect_skips` the stream cannot tell. Pass `detect_skips=True` when you read
+such a device and your consumer may fall behind. It is off by default because
+it costs a device command at the start and a reconnect whenever the queue stays
+full.
+
+```python
+with device.stream(detect_skips=True) as stream:
+    for item in stream.items():
+        if isinstance(item, logprobe.Gap) and item.cause == "stalled":
+            print("lines may be missing on", item.serial)
+```
+
+With `detect_skips=True`:
+
+- `start()` reads each device's API level once (`getprop ro.build.version.sdk`).
+- On API levels 25 and below and on 30, the reader closes its connection itself
+  once it has waited a whole second for room in the queue since it last read
+  from the device. A WARNING says so. It then waits until the queue is at most
+  half full (in lines and in bytes), and connects again as after any other
+  disconnect. A gap with the cause `stalled` is reported when the replay check
+  finds lines missing or cannot verify that the new connection continues the
+  old one; lines lost in a log buffer from which nothing was read in the last
+  second before the stall can go unreported. The wait counts as waiting for room, so it does not use up
+  the budget of `stop(flush=...)`.
+- Other API levels cut a slow reader off themselves, which the stream always
+  detects, so the option is ignored for them. An INFO message says so.
+- A device whose API level cannot be read (the command fails, prints no number
+  or a number of more than four digits, or takes longer than 5 seconds) is
+  treated as an older one, and a WARNING says so. An adb error while reading
+  it fails `start()` as the other start steps do.
+- logd's behaviour was measured on emulators at API levels 24, 26, 28 to 32
+  and 36. Levels 25, 27, 33 to 35 and above 36 were not; 25 is treated as
+  older, the others as newer.
+
+Not detected, even with the option:
+
+- Lines logd skipped before the reader had waited a whole second.
+- Lines skipped while the reader never waits a whole second in all for room
+  between two reads from the device (a slow consumer that still takes lines
+  often enough).
+
+With several devices, a device that closed its connection this way connects
+again only once the queue is half empty. While the other devices keep it
+fuller than that (they log more than a slow consumer takes), it stays
+disconnected, and lines that its own log buffer on the device overwrites
+meanwhile are lost. They are reported as a gap when it connects again where the
+gap check can tell; the losses listed as unreported under
+[Reconnect and resume](#reconnect-and-resume) stay unreported.
 
 ## Several devices in one stream
 

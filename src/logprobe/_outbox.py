@@ -49,25 +49,56 @@ waiting producers once: from then on a `Outbox.put` made with
 its chunk, unless it is admitted at once. The caller does what the interruption
 was for and puts the same chunk again; the producer's place in its own order is
 kept, because it is the same producer.
+
+A time limit. A `Outbox.put` made with ``limit`` gives up once it has waited
+that many seconds without being admitted: it returns `STALLED` and does not
+queue its chunk. An interruption that is due wins over the limit, a stop
+admits the producer and a kill drops the chunk, so none of those ever returns
+`STALLED`. The time waited counts in the producer's total like any wait.
+
+Waiting until the queue is half empty. `Outbox.wait_half_empty` waits until
+both counts are at most half their caps. It takes no place among the waiting
+producers, so it holds up no `Outbox.put`; its time counts in the producer's
+total of `Outbox.backpressure`, as a wait in progress and once it ended.
 """
 
 from __future__ import annotations
 
+import enum
 import threading
 from collections import deque
 from time import monotonic, perf_counter
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any, Final, Literal, overload
 
 if TYPE_CHECKING:
     from collections.abc import Hashable, Sequence
 
-__all__ = ["MARKER_BYTES", "TICK", "Outbox"]
+__all__ = ["MARKER_BYTES", "STALLED", "TICK", "Outbox"]
 
 # Longest time any wait runs before it looks at the stop and kill flags.
 TICK = 0.25
 
 # Bytes charged for a segment that is not a list of entries.
 MARKER_BYTES = 256
+
+
+class _Stalled(enum.Enum):
+    """The type of `STALLED`; an enum, so that type checkers can tell it apart."""
+
+    STALLED = "stalled"
+
+
+#: What a `Outbox.put` with a ``limit`` returns when the limit passed first.
+STALLED: Final = _Stalled.STALLED
+
+
+class _Turn(enum.Enum):
+    """How a producer's wait in line ended."""
+
+    ADMITTED = enum.auto()  # it may go in, or the queue was killed
+    INTERRUPTED = enum.auto()
+    STALLED = enum.auto()
+
 
 # The queue never looks inside a segment except to count a list's length, so it
 # does not constrain what the segments are.
@@ -113,8 +144,9 @@ class _Ledger:
         self._bytes = 0
         self._waiters: deque[object] = deque()  # tickets, in arrival order
         self._waited: dict[Hashable, float] = {}  # finished waits per producer
-        # Waits in progress: ticket -> (producer, start).
+        # Waits in progress (in line, or for half empty): key -> (producer, start).
         self._since: dict[object, tuple[Hashable, float]] = {}
+        self._draining = 0  # producers waiting for the queue to be half empty
         self._stopping = False
         self._killed = False
         self._interrupted = False
@@ -184,6 +216,9 @@ class _Ledger:
     def _has_room(self) -> bool:
         return self._lines < self._max_lines and self._bytes < self._max_bytes
 
+    def _half_empty(self) -> bool:
+        return 2 * self._lines <= self._max_lines and 2 * self._bytes <= self._max_bytes
+
     def _admissible(self, ticket: object) -> bool:
         """True when the producer with ``ticket`` is first in line and may go in."""
         return self._waiters[0] is ticket and (self._stopping or self._has_room())
@@ -243,6 +278,31 @@ class _Ledger:
             self._waited[producer] = self._waited.get(producer, 0.0) + waited
         return waited
 
+    def _enter_drain(self, producer: Hashable) -> object:
+        """Start a wait for half empty, outside the line; return its key."""
+        key = object()
+        self._since[key] = (producer, perf_counter())
+        self._draining += 1
+        return key
+
+    def _leave_drain(self, key: object) -> None:
+        """End a wait for half empty; its time goes to the producer's total."""
+        producer, start = self._since.pop(key)
+        self._waited[producer] = self._waited.get(producer, 0.0) + (
+            perf_counter() - start
+        )
+        self._draining -= 1
+
+    def _slice(self, deadline: float | None) -> float | None:
+        """The next slice of a wait until ``deadline`` (a ``perf_counter`` time).
+
+        None when the deadline has passed; with no deadline, a whole slice.
+        """
+        if deadline is None:
+            return self._tick
+        left = deadline - perf_counter()
+        return min(self._tick, left) if left > 0 else None
+
 
 class Outbox(_Ledger):
     """A bounded queue of chunks with arrival-ordered admission.
@@ -293,6 +353,7 @@ class Outbox(_Ledger):
         producer: Hashable | None = None,
         *,
         interruptible: Literal[False] = False,
+        limit: None = None,
     ) -> float: ...
 
     @overload
@@ -303,7 +364,30 @@ class Outbox(_Ledger):
         producer: Hashable | None = None,
         *,
         interruptible: bool,
+        limit: None = None,
     ) -> float | None: ...
+
+    @overload
+    def put(
+        self,
+        segments: Chunk,
+        charge: int,
+        producer: Hashable | None = None,
+        *,
+        interruptible: Literal[False] = False,
+        limit: float | None,
+    ) -> float | _Stalled: ...
+
+    @overload
+    def put(
+        self,
+        segments: Chunk,
+        charge: int,
+        producer: Hashable | None = None,
+        *,
+        interruptible: bool,
+        limit: float | None,
+    ) -> float | _Stalled | None: ...
 
     def put(
         self,
@@ -312,7 +396,8 @@ class Outbox(_Ledger):
         producer: Hashable | None = None,
         *,
         interruptible: bool = False,
-    ) -> float | None:
+        limit: float | None = None,
+    ) -> float | _Stalled | None:
         """Queue one chunk, waiting while the queue is at a cap.
 
         Args:
@@ -324,12 +409,15 @@ class Outbox(_Ledger):
             producer: Key under which this call's wait is added to the
                 per-producer total (see `backpressure`); None keeps no total.
             interruptible: Give up waiting once `interrupt_waiters` was called.
+            limit: Give up waiting after this many seconds; None waits as long
+                as it takes.
 
         Returns:
             Seconds this call waited for space; 0.0 when it did not wait.
             After a kill request the chunk is dropped and the wait so far is
-            returned. None when the wait was interrupted: the chunk is not
-            queued, and the time waited is already in the producer's total.
+            returned. None when the wait was interrupted, `STALLED` when the
+            limit passed first: the chunk is not queued, and the time waited is
+            already in the producer's total.
 
         """
         lines, charge = _measure(segments, charge)
@@ -340,14 +428,14 @@ class Outbox(_Ledger):
                 return 0.0
             waited = 0.0
             if self._waiters or not (self._stopping or self._has_room()):
-                waited, interrupted = self._wait_turn(
-                    producer, interruptible=interruptible
+                waited, turn = self._wait_turn(
+                    producer, interruptible=interruptible, limit=limit
                 )
                 if self._killed:
                     self._drop()
                     return waited
-                if interrupted:
-                    return None
+                if turn is not _Turn.ADMITTED:
+                    return STALLED if turn is _Turn.STALLED else None
             self._admit(segments, lines, charge)
             self._ready.notify()
             return waited
@@ -380,7 +468,7 @@ class Outbox(_Ledger):
                     step = min(step, left)
                 self._ready.wait(step)
             segments = self._release()
-            if self._waiters:
+            if self._waiters or self._draining:
                 self._space.notify_all()
             return segments
 
@@ -399,26 +487,53 @@ class Outbox(_Ledger):
         with self._space:
             self._drop()
 
+    def wait_half_empty(self, producer: Hashable) -> bool:
+        """Wait until both counts are at most half their caps.
+
+        The wait takes no place in line, so other producers are admitted as
+        before, and its time is added to ``producer``'s total (see
+        `backpressure`). An interruption does not end it.
+
+        Returns:
+            True when the queue is half empty; False when a stop or kill was
+            requested first.
+        """
+        with self._space:
+            key = self._enter_drain(producer)
+            try:
+                while not self._stopping and not self._half_empty():
+                    self._space.wait(self._tick)
+            finally:
+                self._leave_drain(key)
+            return not self._stopping
+
     def _wait_turn(
-        self, producer: Hashable | None, *, interruptible: bool
-    ) -> tuple[float, bool]:
+        self, producer: Hashable | None, *, interruptible: bool, limit: float | None
+    ) -> tuple[float, _Turn]:
         """Wait, lock held, until this producer is first in line with room.
 
         Also returns when a stop or kill is requested (a stop admits without
-        room, a kill drops the chunk), or, if ``interruptible``, when the
-        waiters were interrupted. Returns the seconds waited and whether the
-        wait ended by an interruption with the producer not admitted.
+        room, a kill drops the chunk), if ``interruptible`` when the waiters
+        were interrupted, and once ``limit`` seconds passed with no stop
+        requested; an interruption that is due wins over the limit. Returns
+        the seconds waited and how the wait ended.
         """
         ticket, start = self._enter_line(producer)
-        interrupted = False
+        deadline = None if limit is None else start + limit
+        turn = _Turn.ADMITTED
         try:
             while not self._killed and not self._admissible(ticket):
                 if interruptible and self._interrupted:
-                    interrupted = True
+                    turn = _Turn.INTERRUPTED
                     break
-                self._space.wait(self._tick)
+                # A stop admits every producer in turn, so the limit no longer applies.
+                step = self._slice(None if self._stopping else deadline)
+                if step is None:
+                    turn = _Turn.STALLED
+                    break
+                self._space.wait(step)
         finally:
             waited = self._leave_line(ticket, producer, start)
             # The next in line may be admissible now.
             self._wake_producers()
-        return waited, interrupted
+        return waited, turn

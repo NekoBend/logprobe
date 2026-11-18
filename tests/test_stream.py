@@ -36,6 +36,7 @@ from logprobe import (
     Not,
     Package,
     Tag,
+    _astream,
     _stream,
     stream,
 )
@@ -204,6 +205,9 @@ def interrupt_main_soon() -> None:
         ({"reconnect": -(10**400)}, ValueError),
         ({"level": "X"}, ValueError),
         ({"tag": []}, ValueError),
+        ({"detect_skips": 1}, TypeError),
+        ({"detect_skips": "yes"}, TypeError),
+        ({"detect_skips": None}, TypeError),
     ],
 )
 def test_arguments_are_checked_at_call_time(
@@ -1154,23 +1158,72 @@ def test_lifecycle_stop_during_the_features_check(
     assert list(s) == []
 
 
+@pytest.mark.parametrize(
+    ("detect_skips", "stop_after"),
+    [(False, "features"), (True, "features"), (True, "api level")],
+)
 def test_lifecycle_a_stop_between_the_start_steps_runs_no_further_command(
-    server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
+    server: FakeAdbServer,
+    mode: Mode,
+    monkeypatch: pytest.MonkeyPatch,
+    stop_after: str,
+    *,
+    detect_skips: bool,
 ) -> None:
     """A stop that arrives as a step ends must not let the next step run.
 
-    The device clock would fail, and the start marker would write into the
-    device's log: neither may happen after the stop.
+    The API level would be read, the device clock would fail, and the start
+    marker would write into the device's log: none may happen after the stop.
     """
     server.add_sequence(
         "date +%s", ShellScript(steps=[("stderr", b"odd\n")], exit_status=1)
     )
+    server.answer("getprop ro.build.version.sdk", b"24\n")
     (device,) = attach(server, "a")
-    s = mode.device_stream(device, since="now")
-    mode.after_features_check(monkeypatch, device, s.stop)
+    s = mode.device_stream(device, since="now", detect_skips=detect_skips)
+    if stop_after == "features":
+        mode.after_features_check(monkeypatch, device, s.stop)
+    else:
+        judge = _stream._judge_logd
+
+        def judged(*args: Any) -> None:  # noqa: ANN401
+            judge(*args)
+            s.stop()
+
+        monkeypatch.setattr(_stream, "_judge_logd", judged)
+        monkeypatch.setattr(_astream, "_judge_logd", judged)
     assert s.start() is s
-    assert server.records == []  # no command, no logcat
+    ran = [program_of(record.command).split()[0] for record in server.records]
+    assert ran == ([] if stop_after == "features" else ["getprop"])  # no logcat
     assert s.join().devices[0].error is None
+    assert list(s) == []
+
+
+@pytest.mark.parametrize("request_name", ["stop", "kill"])
+def test_lifecycle_a_stop_or_kill_while_the_api_level_is_read_ends_the_start(
+    server: FakeAdbServer, mode: Mode, request_name: str
+) -> None:
+    """The start does not wait for a hanging ``getprop`` nor run anything after it."""
+    server.oneoff["getprop"] = ShellScript(steps=[Wait("getprop")])
+    (device,) = attach(server, "a")
+    s = mode.device_stream(device, detect_skips=True)
+    requested_at: list[float] = []
+
+    def requester() -> None:
+        assert server.wait_reached("getprop", GUARD)
+        requested_at.append(time.monotonic())
+        getattr(s, request_name)()
+
+    thread = threading.Thread(target=requester)
+    thread.start()
+    with kill_if_hung(s):
+        assert s.start() is s
+        returned = time.monotonic()
+    thread.join(GUARD)
+    assert returned - requested_at[0] < PROMPT
+    ran = [program_of(record.command).split()[0] for record in server.records]
+    assert ran == ["getprop"]  # no date, marker or logcat
+    assert s.join(GUARD).devices[0].error is None
     assert list(s) == []
 
 

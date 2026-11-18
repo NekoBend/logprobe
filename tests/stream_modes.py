@@ -228,8 +228,13 @@ class Mode:
             monkeypatch.setattr(device, "_open_logcat", failing_open)
 
     def patch_read_size(self, monkeypatch: pytest.MonkeyPatch, size: int) -> None:
-        """Make a reader take about ``size`` bytes of output at a time."""
+        """Make a reader receive and feed about ``size`` bytes of output at a time.
+
+        The asyncio reader gets both a smaller network read and a smaller batch:
+        the stall limit of ``detect_skips`` counts per network read.
+        """
         if self.is_async:
+            monkeypatch.setattr(_aadb, "RECV_SIZE", size)
             monkeypatch.setattr(_astream, "_BATCH_BYTES", size)
         else:
             monkeypatch.setattr(logprobe._stream, "RECV_SIZE", size)
