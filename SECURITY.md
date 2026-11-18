@@ -20,7 +20,8 @@ Examples of what to report:
   program or the arguments of a device command in a way they are not meant to
   change. Intended: `Device.shell()` runs the command the caller gives it,
   with each argument quoted, and logcat's `-T` time comes from the device's
-  clock or from the last line read, after it is checked.
+  clock (checked first) or, after a reconnect, from the newest time among the
+  log lines parsed so far.
 - logprobe connects to anything other than the adb server it was given (or
   the default one), or resolves a host name for it.
 - logprobe starts a local process other than the executable selected as
