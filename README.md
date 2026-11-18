@@ -46,7 +46,8 @@ not accepted while logprobe is in alpha.
 
 ## Requirements
 
-- Python 3.12 or later.
+- Python 3.12 or later. CI tests Python 3.12, 3.13 and 3.14 on Linux and
+  Windows; macOS is untested.
 - An adb server. When no server answers at the default address
   (127.0.0.1:5037), logprobe may run `adb start-server`; the conditions are in
   [Starting the adb server](docs/connecting.md#starting-the-adb-server). Pass
