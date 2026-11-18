@@ -6,7 +6,8 @@ snapshot, parse saved logcat files, filter entries and export them.
 **Status: alpha.** The API may change without notice until a stable release.
 See [Known gaps](#known-gaps). Bug reports and questions are welcome as
 [GitHub issues](https://github.com/NekoBend/logprobe/issues). Pull requests are
-not accepted while logprobe is in alpha.
+not accepted while logprobe is in alpha. To report a security vulnerability, see
+[SECURITY.md](SECURITY.md).
 
 ## What it does
 
