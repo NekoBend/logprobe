@@ -320,6 +320,17 @@ class Marks:
         if self.state == "done":
             self.state = "timed_out"
 
+    def budget_ran_out(self) -> None:
+        """A command limited by the flush budget ran out of time: the flush is over.
+
+        An asyncio timer can fire a little before the budget is used up by
+        `perf_counter` (its clock moves in steps of about 16 ms on Windows), so
+        the reader reports the cut instead of waiting for `left` to reach zero.
+        A pending flush and one already ``done`` both end as ``timed_out``.
+        """
+        if self.state == "done" or (self.request is not None and not self.over):
+            self.state = "timed_out"
+
     def end_unfinished(self, *, requested: bool) -> None:
         """The reader ends: a requested flush that has no result is ``cancelled``."""
         if requested and not self.over:

@@ -2686,26 +2686,38 @@ def test_the_start_list_has_one_limit_for_pm_and_dumpsys(
 
 
 @pytest.mark.parametrize(
-    ("cut", "left", "overran"),
+    ("state", "requested", "after"),
     [
-        (True, 0.01, True),
-        (False, 0.01, False),
-        (False, 0.0, True),
-        (False, None, False),
+        ("not_requested", True, "timed_out"),
+        ("done", True, "timed_out"),
+        ("not_requested", False, "not_requested"),
+        ("failed", True, "failed"),
     ],
-    ids=["cut-by-the-budget", "gave-up-early", "budget-used-up", "no-budget"],
+    ids=["pending", "done", "no-flush", "over"],
 )
-def test_a_flush_ends_timed_out_when_the_budget_cut_the_list(
-    monkeypatch: pytest.MonkeyPatch, *, cut: bool, left: float | None, overran: bool
+def test_a_list_command_cut_by_the_flush_budget_ends_the_flush(
+    state: str, *, requested: bool, after: str
 ) -> None:
-    """A list command cut by the flush budget's limit ends the flush as
-    timed_out even when ``perf_counter`` still shows a little budget (an
-    asyncio timer can fire early); a read that gave up before any command
-    with budget left keeps the flush done."""
-    calls: list[str] = []
-    marks = SimpleNamespace(state="done", overran=lambda: calls.append("overran"))
-    unit = SimpleNamespace(marks=marks, flush_cut=cut)
-    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: left)
-    _stream._flush_overran(cast("Any", None), cast("Any", unit), "cut")
-    assert (calls == ["overran"]) is overran
-    assert unit.flush_cut is False
+    """When the command the flush budget limited times out, the flush is over,
+    pending or done, even if `perf_counter` still shows a little budget (an
+    asyncio timer can fire early); a flush that ended already keeps its end."""
+    marks = _marks.Marks("emu")
+    if requested:
+        marks.request = cast("Any", SimpleNamespace())
+    marks.state = cast("Any", state)
+    marks.budget_ran_out()
+    assert marks.state == after
+
+
+def test_the_list_limit_says_which_deadline_set_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit = cast("Any", None)
+    now = time.perf_counter()
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: 1.0)
+    limit, by_flush = _stream._list_limit_of(cast("Any", None), unit, now + 5.0)
+    assert (limit, by_flush) == (1.0, True)
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: None)
+    limit, by_flush = _stream._list_limit_of(cast("Any", None), unit, now + 5.0)
+    assert by_flush is False
+    assert 4.0 < limit <= 5.0

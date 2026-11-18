@@ -134,14 +134,13 @@ from ._stream import (
     _feed_output,
     _finish,
     _first_argv,
-    _flush_limits,
     _flush_overran,
     _idle_ended,
     _judge_logd,
     _judge_read,
     _list_cancelled,
     _list_is_due,
-    _list_limit,
+    _list_limit_of,
     _list_too_late,
     _list_wait_step,
     _listing_wait_step,
@@ -404,13 +403,14 @@ async def _take_list(
     job = attributor.list_started(perf_counter())
     job.started = perf_counter()
     while not job.finished:
-        limit = (
-            deadline - perf_counter() if starting else _list_limit(core, unit, deadline)
+        limit, by_flush = (
+            (deadline - perf_counter(), False)
+            if starting
+            else _list_limit_of(core, unit, deadline)
         )
         if limit <= 0:
             job.fail(late)
             break
-        by_flush = not starting and _flush_limits(core, unit, deadline)
         try:
             result = await _run_command(core, unit, job.argv, limit, cancelled)
         except _adb.Cancelled:
@@ -420,7 +420,8 @@ async def _take_list(
                 return _STOPPED_LISTING
             job.fail(late)
         except TimeoutError:
-            unit.flush_cut = unit.flush_cut or by_flush
+            if by_flush:
+                unit.marks.budget_ran_out()
             job.fail(late)
         except (LogprobeError, OSError) as error:
             if starting:
