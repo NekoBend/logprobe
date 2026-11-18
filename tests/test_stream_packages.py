@@ -963,7 +963,7 @@ def test_the_regular_list_keeps_the_pacing(
 
 
 def test_a_flush_marker_in_a_read_whose_list_hangs_times_out(
-    server: FakeAdbServer, mode: Mode
+    server: FakeAdbServer, mode: Mode, caplog: pytest.LogCaptureFixture
 ) -> None:
     server.add_sequence(PM, pm_list({}), ShellScript([Wait("slow")]))
 
@@ -981,12 +981,15 @@ def test_a_flush_marker_in_a_read_whose_list_hangs_times_out(
     assert time.monotonic() - requested <= 1.0 + PROMPT
     assert shape(items) == ["before"]
     device = summary.devices[0]
-    # The read takes a list only with enough time left; on a slow runner it
-    # may not, and then the marker ends the flush. Either way the line counts.
-    started = len(records(server, PM)) == 2
-    assert (device.flush, device.unattributed) == (
-        ("timed_out", 1) if started else ("done", 1)
-    )
+    # The read takes a list only with at least `LIST_MIN_TIME` of its time
+    # left. On a slow runner it may not; then no list starts, the line counts
+    # for that reason, and the marker ends the flush.
+    if len(records(server, PM)) == 2:
+        assert (device.flush, device.unattributed) == ("timed_out", 1)
+    else:
+        assert len(records(server, PM)) == 1
+        assert (device.flush, device.unattributed) == ("done", 1)
+        assert any(_stream._LIST_TOO_LATE in r.getMessage() for r in caplog.records)
 
 
 def test_a_flush_does_not_wait_for_a_regular_list_that_hangs(
