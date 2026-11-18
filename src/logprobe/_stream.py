@@ -701,8 +701,15 @@ def _flush_overran(core: _CoreBase[Any], unit: _Unit, cause: str | None) -> None
     if cause is None or marks.state != "done":
         return
     left = _list_time_left(core, unit)
-    if left is not None and left <= 0:
+    if left is not None and left <= _TIMER_SLACK:
         marks.overran()
+
+
+# A command cut at a time limit can end a little before that limit by the
+# `perf_counter` clock: the asyncio loop's timers follow the event loop's
+# clock, which on Windows with Python 3.12 moves in steps of about 16 ms. A
+# flush budget left within this slack counts as used up.
+_TIMER_SLACK = 0.05
 
 
 def _set_boundary(unit: _Unit, result: ShellResult | None) -> None:

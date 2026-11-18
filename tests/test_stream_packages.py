@@ -963,7 +963,7 @@ def test_the_regular_list_keeps_the_pacing(
 
 
 def test_a_flush_marker_in_a_read_whose_list_hangs_times_out(
-    server: FakeAdbServer, mode: Mode, caplog: pytest.LogCaptureFixture
+    server: FakeAdbServer, mode: Mode
 ) -> None:
     server.add_sequence(PM, pm_list({}), ShellScript([Wait("slow")]))
 
@@ -981,15 +981,7 @@ def test_a_flush_marker_in_a_read_whose_list_hangs_times_out(
     assert time.monotonic() - requested <= 1.0 + PROMPT
     assert shape(items) == ["before"]
     device = summary.devices[0]
-    # The read takes a list only with at least `LIST_MIN_TIME` of its time
-    # left. On a slow runner it may not; then no list starts, the line counts
-    # for that reason, and the marker ends the flush.
-    if len(records(server, PM)) == 2:
-        assert (device.flush, device.unattributed) == ("timed_out", 1)
-    else:
-        assert len(records(server, PM)) == 1
-        assert (device.flush, device.unattributed) == ("done", 1)
-        assert any(_stream._LIST_TOO_LATE in r.getMessage() for r in caplog.records)
+    assert (device.flush, device.unattributed) == ("timed_out", 1)
 
 
 def test_a_flush_does_not_wait_for_a_regular_list_that_hangs(
@@ -2691,3 +2683,19 @@ def test_the_start_list_has_one_limit_for_pm_and_dumpsys(
     assert "'dumpsys package packages' did not finish within the 0.6 seconds" in (
         warning
     )
+
+
+@pytest.mark.parametrize(("left", "overran"), [(0.01, True), (0.0, True), (0.2, False)])
+def test_a_flush_whose_budget_is_left_within_the_timer_slack_counts_as_used_up(
+    monkeypatch: pytest.MonkeyPatch, left: float, *, overran: bool
+) -> None:
+    """A list command cut at the flush budget can end a few milliseconds early
+    by `perf_counter` (an asyncio timer on Windows follows a coarser clock);
+    what is left within that slack still ends the flush as timed_out."""
+    calls: list[str] = []
+    marks = SimpleNamespace(state="done", overran=lambda: calls.append("overran"))
+    monkeypatch.setattr(_stream, "_list_time_left", lambda _core, _unit: left)
+    _stream._flush_overran(
+        cast("Any", None), cast("Any", SimpleNamespace(marks=marks)), "cut"
+    )
+    assert (calls == ["overran"]) is overran
