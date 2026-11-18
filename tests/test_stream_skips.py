@@ -1528,8 +1528,16 @@ def test_a_stop_before_the_first_read_reads_nothing(
     class AsyncStoppingRun(_astream._ARun):
         def __init__(self, stream: Any, serial: str, check: Any) -> None:  # noqa: ANN401
             super().__init__(stream, serial, check)
-            # The loop is held here, so the bytes stay where they are now.
-            if not len(getattr(stream._reader, "_buffer")):  # noqa: B009
+            # The loop is held here, so the bytes stay where they are now. A
+            # proactor loop (Windows) has its socket read under way already, so
+            # the bytes cannot be seen in the socket; there the test only knows
+            # that the fake wrote them.
+            proactor = getattr(asyncio, "ProactorEventLoop", None)
+            if proactor is not None and isinstance(
+                asyncio.get_running_loop(), proactor
+            ):
+                assert server.wait_reached("blocked")
+            elif not len(getattr(stream._reader, "_buffer")):  # noqa: B009
                 arrived(stream._writer.get_extra_info("socket"))
             s.stop()
 
