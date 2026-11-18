@@ -68,6 +68,8 @@ pip install "git+https://github.com/NekoBend/logprobe"
 uv add "git+https://github.com/NekoBend/logprobe"
 ```
 
+`logprobe.__version__` gives the installed version.
+
 ## Quick start
 
 Take a snapshot of what the device's log holds now (here: the entries at level

@@ -65,8 +65,13 @@ __all__ = [
 # ``import logprobe`` does not import asyncio.
 _ASYNC_NAMES = frozenset({"AsyncLogStream", "astream"})
 
-# Hidden from type checkers: they see the two names through the import above,
-# and a visible __getattr__ would make them accept any misspelt name.
+# The installed package's version, read from its metadata when first used, so
+# that ``import logprobe`` does not import importlib.metadata.
+__version__: str
+
+# Hidden from type checkers: they see the names through the import and the
+# annotation above, and a visible __getattr__ would make them accept any
+# misspelt name.
 if not TYPE_CHECKING:
 
     def __getattr__(name: str) -> object:
@@ -74,11 +79,20 @@ if not TYPE_CHECKING:
             from . import _astream
 
             value = getattr(_astream, name)
-            globals()[name] = value
-            return value
-        msg = f"module {__name__!r} has no attribute {name!r}"
-        raise AttributeError(msg)
+        elif name == "__version__":
+            from importlib.metadata import PackageNotFoundError, version
+
+            try:
+                value = version(__name__)
+            except PackageNotFoundError:  # run from a source tree, not installed
+                value = "0+unknown"
+        else:
+            msg = f"module {__name__!r} has no attribute {name!r}"
+            raise AttributeError(msg)
+        globals()[name] = value
+        return value
 
     def __dir__() -> list[str]:
         # TYPE_CHECKING is imported for the checks above, not offered.
-        return sorted((globals().keys() - {"TYPE_CHECKING"}) | _ASYNC_NAMES)
+        names = globals().keys() - {"TYPE_CHECKING"}
+        return sorted(names | _ASYNC_NAMES | {"__version__"})
