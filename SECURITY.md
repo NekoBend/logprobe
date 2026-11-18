@@ -8,24 +8,28 @@ public issue for it.
 
 ## Supported versions
 
-logprobe is an alpha. Fixes go into `main` and the latest alpha release only.
+logprobe is an alpha with no release yet. Fixes go into `main`. Once an alpha
+release exists, the latest one is supported too.
 
 ## What counts as a vulnerability
 
 Examples of what to report:
 
-- logprobe sends a command to a device that the caller did not ask for, or
-  lets text from a log line, a device or a caller reach a device command.
+- logprobe sends a device command of its own that the documentation does not
+  list, or text from a log line, a device or an adb server reply changes the
+  program or the arguments of a device command. (`Device.shell()` runs the
+  command the caller gives it, with each argument quoted; that is intended.)
 - logprobe connects to anything other than the adb server it was given (or
   the default one), or resolves a host name for it.
-- logprobe runs a program on the computer other than the `adb` executable it
-  found or was given (it runs `adb start-server` only).
-- logprobe overwrites or deletes a file on the computer other than the
-  destination the caller passed to `export_logs`.
+- logprobe runs any program other than the executable selected as `adb`, or
+  runs that executable with anything but `start-server`.
+- `export_logs` writes or deletes a file other than its resolved destination
+  and the temporary file it creates next to it.
 - A crafted log line, log file or adb server reply makes logprobe hang, use
-  unbounded memory, or run code.
+  memory far beyond what the operation needs, or run code.
 
-A crash or wrong output without such an effect is an ordinary bug: please
-report it as an issue.
+A crash or wrong output with a plausible security impact also belongs here.
+Other crashes and wrong output are ordinary bugs: please report them as
+issues.
 
 There is no promised response time.
