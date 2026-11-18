@@ -113,25 +113,27 @@ def test_an_unknown_name_is_an_attribute_error() -> None:
 
 
 def test_the_version_is_the_installed_one_and_read_only_when_used() -> None:
-    """``logprobe.__version__`` is the installed distribution's version, which
-    pyproject.toml sets; ``import logprobe`` does not import importlib.metadata
-    (a new interpreter, isolated, as in the asyncio test above)."""
-    import tomllib
+    """``logprobe.__version__`` is the installed distribution's version;
+    ``import logprobe`` does not import importlib.metadata, ``dir()`` lists the
+    name before it is read, the metadata is read once, and without metadata
+    the version is ``0+unknown`` (a new isolated interpreter, as above)."""
+    from importlib.metadata import version
 
-    pyproject = Path(logprobe.__file__).parent.parent.parent / "pyproject.toml"
-    expected = tomllib.loads(pyproject.read_text(encoding="utf-8"))["project"][
-        "version"
-    ]
-    assert logprobe.__version__ == expected
-    assert "__version__" in dir(logprobe)
+    assert logprobe.__version__ == version("logprobe")
     root = str(Path(logprobe.__file__).parent.parent)
     code = f"""
 import sys
 sys.path.insert(0, {root!r})
 import logprobe
 print("importlib.metadata" in sys.modules)
-print(logprobe.__version__)
-print("importlib.metadata" in sys.modules)
+print("__version__" in dir(logprobe), "__version__" in vars(logprobe))
+import importlib.metadata as metadata
+calls = []
+def missing(name):
+    calls.append(name)
+    raise metadata.PackageNotFoundError(name)
+metadata.version = missing
+print(logprobe.__version__, logprobe.__version__, calls)
 """
     result = subprocess.run(  # the test's own code on this interpreter
         [sys.executable, "-I", "-S", "-B", "-c", code],
@@ -141,8 +143,8 @@ print("importlib.metadata" in sys.modules)
         timeout=60,
     )
     assert result.returncode == 0, result.stderr
-    lines = result.stdout.splitlines()
-    assert lines[0] == "False"
-    assert lines[2] == "True"
-    # Without site the installed metadata is not on the path: the fallback.
-    assert lines[1] in {expected, "0+unknown"}
+    assert result.stdout.splitlines() == [
+        "False",  # import logprobe leaves importlib.metadata alone
+        "True False",  # listed by dir(), not read yet
+        "0+unknown 0+unknown ['logprobe']",  # no metadata: the fallback, read once
+    ]

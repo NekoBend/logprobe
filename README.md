@@ -68,7 +68,8 @@ pip install "git+https://github.com/NekoBend/logprobe"
 uv add "git+https://github.com/NekoBend/logprobe"
 ```
 
-`logprobe.__version__` gives the installed version.
+`logprobe.__version__` gives the installed version (`0+unknown` when no
+installed package metadata is found, as in a source tree that is not installed).
 
 ## Quick start
 
