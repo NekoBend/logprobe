@@ -534,6 +534,13 @@ def test_a_stopped_stream_is_freed_without_the_cycle_collector(
         gc.disable()
         try:
             connection = await finished()
+            # Let the loop finish closing the transport; a proactor loop
+            # (Windows) does that in later iterations. The cycle collector stays
+            # off, so only plain reference counting can free the connection.
+            for _ in range(20):
+                if connection() is None:
+                    break
+                await asyncio.sleep(0.01)
             assert connection() is None
         finally:
             gc.enable()
