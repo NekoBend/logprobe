@@ -515,13 +515,15 @@ class Feeder:
             what = f"the device dropped {gap.lost} lines"
         else:
             what = f"lines may be missing or repeated after a reconnect ({gap.cause})"
-        _LOG.warning(
-            "%s: a gap in the log (%s): %s; later gaps of this kind are counted "
-            "and told once when the read ends",
-            self.serial,
-            gap.reason,
-            what,
-        )
+        # Best effort: a logging handler that raises must not end the read.
+        with contextlib.suppress(Exception):
+            _LOG.warning(
+                "%s: a gap in the log (%s): %s; later gaps of this kind are "
+                "counted and told once when the read ends",
+                self.serial,
+                gap.reason,
+                what,
+            )
 
     def tell_later_gaps(self) -> None:
         """Log, in one WARNING, how many gaps came after the first of each reason.

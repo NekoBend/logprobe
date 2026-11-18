@@ -813,6 +813,37 @@ def test_a_cancelled_adump_closes_the_connection(
     closed(fake)
 
 
+def test_a_cancelled_adump_still_logs_the_count_of_its_later_gaps(
+    fake: FakeAdbServer,
+    device: Device,
+    streams: list[_adb.ShellStream | _aadb.AsyncShellStream],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from tests.device_facts import level_dir, load
+
+    notices = load(level_dir(24), "C06")["facts"]["notice_details"]
+    recorded = [each["line"] for each in notices[:2]]
+    script(fake, ("stdout", text(*recorded)), Wait("hold"))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(device.adump())
+        while not (streams and len(gap_warnings(caplog)) == 1):  # noqa: ASYNC110  (the dump task)
+            await asyncio.sleep(0.005)
+        while not fake.wait_reached("hold", 0):  # noqa: ASYNC110  (the fake's thread)
+            await asyncio.sleep(0.005)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    with caplog.at_level("WARNING", logger="logprobe"):
+        run(scenario())
+    assert gap_warnings(caplog)[1:] == [
+        f"{SERIAL}: 1 more gaps in the log after the first of each kind "
+        "(device_reported 1)"
+    ]
+    closed(fake)
+
+
 def test_adump_starts_no_thread(
     fake: FakeAdbServer, device: Device, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -1007,9 +1007,8 @@ class TestGapLogging:
             "s1: 1 more gaps in the log after the first of each kind (ring_rotated 1)"
         ]
 
-    def test_a_raising_handler_does_not_stop_the_end_of_a_read(self) -> None:
+    def test_a_raising_handler_does_not_stop_a_read_or_its_end(self) -> None:
         feeder = Feeder("s1")
-        feeder.feed(data(notice(5), notice(2)))
 
         class Raising(logging.Handler):
             def emit(self, record: logging.LogRecord) -> None:
@@ -1023,7 +1022,9 @@ class TestGapLogging:
         handler = Raising()
         log.addHandler(handler)
         try:
+            out = feeder.feed(data(line(0, "a"), notice(5), notice(2)))  # no exception
             feeder.tell_later_gaps()  # no exception
         finally:
             log.removeHandler(handler)
-        assert feeder.gaps == 2
+        assert shape(out) == [1, "Gap", 1, "Gap", 1]
+        assert (feeder.gaps, feeder.lost, feeder.entries) == (2, 7, 3)
