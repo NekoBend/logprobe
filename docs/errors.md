@@ -212,8 +212,12 @@ Raised in two places:
   `command` is the last command run (`pm list packages -U` or
   `dumpsys package packages`).
 
-A stream's package list never raises it: a list that fails leaves the device
-without a list for a while (see
+A stream's package list never raises it. After a list that fails, the device
+gets no new list for 30 seconds: the last list that succeeded still decides
+the app ids it names, and the lines it cannot decide are counted as
+`unattributed`. When the first list fails, every line of an app id from 10000
+to 19999 whose verdict depends on its app is counted, also one logged before
+the device clock read at the start (see
 [streams.md](streams.md#filter-by-app-extra-commands-and-messages)).
 
 | Key | Value |

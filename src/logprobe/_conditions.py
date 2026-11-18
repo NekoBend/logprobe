@@ -855,7 +855,8 @@ class Package(_Members):
       every process of that uid (a WARNING says so). ``entry.package`` is the
       first watched owner by name.
     - Lines of an app's isolated processes (app ids 90000 to 99999, for
-      example a WebView renderer) are not attributed to the app.
+      example a WebView renderer) are not attributed to the app, and not
+      counted as unattributed either.
     - Other users of the device are matched by app id (the uid modulo
       100000). How an app installed only for a secondary user is listed is
       not verified; its lines may not be attributed.
@@ -893,17 +894,23 @@ class Package(_Members):
       clock read before the first list, or always with ``since="now"`` or
       when that clock could not be read (a WARNING names the cause of the
       device's first unattributed line: for such a line, that the app of its
-      uid could not be checked). This holds for every app id that the list
-      taken for a read does not name, until a list names it: the lines of an
-      app that is not watched, installed and removed while the stream was
-      behind, are counted too, and the lines of an app id that no list ever
-      names (perhaps an app installed only for another user, which is not
-      verified) are counted for as long as the stream runs. Only lines whose
-      verdict depends on their app are counted: a line that a term without
-      packages excludes (``Tag("other")`` under ``Package(A) & Tag("keep")``)
-      would not be delivered whether or not it is A's, so not counting it
-      loses nothing. Lines that look older than that clock (after a clock
-      step back) are not counted either.
+      uid could not be checked). This holds for every app id from 10000 to
+      19999 that the list taken for a read does not name, until a list names
+      it: the lines of an app that is not watched, installed and removed while
+      the stream was behind, are counted too, and the lines of an app id that
+      no list ever names (perhaps an app installed only for another user,
+      which is not verified) are counted for as long as the stream runs. When
+      the list taken for the read names the app id (another app got it after
+      the watched app was removed), the lines are judged as that app's and
+      not counted. A line's verdict depends on its app when the condition,
+      evaluated with the line's app unknown (three-valued: true, false or
+      undecided), is undecided. A line that a term without packages excludes
+      (``Tag("other")`` under ``Package(A) & Tag("keep")``) is not delivered
+      whether or not it is A's, so not counting it loses nothing. The
+      evaluation looks only at the terms, so such a line under
+      ``Package(A) | ~Package(A)`` is counted although it is delivered either
+      way. Lines that look older than that clock (after a clock step back)
+      are not counted either.
     - A dump judges by the list read just before it.
     - A stream does not read a device while it takes the device's package
       list at the start (at most 5 seconds) or for a read with a line whose

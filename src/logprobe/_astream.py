@@ -460,9 +460,9 @@ async def _run_listing(
     A command cut by the stop flag or by the deadline fails the list as late.
     After a kill the outcome is not used. After a stop a list that succeeded
     (its last command ended before the stop could cut it) is still handed over
-    as the reader ends (`_settle_listing`), and a failed one, a command cut
-    short by the stop included, is discarded. The pacing to the next list counts
-    from when the first command starts.
+    as the reader ends if this task is done by then (`_settle_listing`); a
+    failed one, a command cut short by the stop included, is discarded. The
+    pacing to the next list counts from when the first command starts.
     """
 
     def cancelled() -> bool:
@@ -590,17 +590,19 @@ def _report_left(serial: str, task: asyncio.Task[None]) -> None:
     """Log the unexpected failure of a regular list's task that was dropped.
 
     The done callback of the task once its reader ended: nobody else takes
-    its exception.
+    its exception. A log handler that fails here is not passed on to the
+    event loop's exception handler.
     """
     if task.cancelled():
         return
     error = task.exception()
     if error is not None:
-        _LOG.error(
-            "%s: the regular package list failed after the reader had ended",
-            serial,
-            exc_info=error,
-        )
+        with contextlib.suppress(Exception):
+            _LOG.error(
+                "%s: the regular package list failed after the reader had ended",
+                serial,
+                exc_info=error,
+            )
 
 
 async def _judged(

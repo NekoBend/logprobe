@@ -53,8 +53,9 @@ Threads and shared state
   fills in its `ListJob`. The reader alone hands the job to the device's
   attributor, after the thread ended, so the attributor has one writer. When
   the reader ends it tells the thread to give up and does not wait for it, so
-  the end of the device is queued at once; the thread ends within ``TICK``
-  seconds (the slice of its command's waits), and ``join`` waits for it after
+  the end of the device is queued at once; the thread gives up at its next
+  check, within ``TICK`` seconds (the slice of its command's waits) unless
+  it is parsing output, and ``join`` waits for it after
   the readers, so no thread of the stream is left once ``join`` returned.
 - This is verified on CPython with the global interpreter lock. The
   free-threaded build is not verified. The guarantee of ``kill()`` allows for
@@ -890,8 +891,9 @@ class _Listing:
     exists only while the list runs. The reader alone hands the job to the
     attributor once the thread ended, also when the reader ends (unless the
     stream was killed; `_settle_listing`). For a list that still runs then,
-    the reader sets ``abandoned`` and does not wait: the thread gives up
-    within ``_adb.TICK`` seconds, and `LogStream.join` waits for it.
+    the reader sets ``abandoned`` and does not wait: the thread gives up at
+    its next check (every ``_adb.TICK`` seconds while it waits for I/O), and
+    `LogStream.join` waits for it.
 
     ``errors`` holds an unexpected failure of the thread (a bug), at most
     one. The reader raises it; once the list is abandoned it is logged
@@ -927,16 +929,21 @@ def _run_listing(core: _Core, unit: _Unit, listing: _Listing) -> None:
 
 
 def _report_left(unit: _Unit, listing: _Listing) -> None:
-    """Log the unexpected failure of an abandoned list's thread, if it has one."""
+    """Log the unexpected failure of an abandoned list's thread, if it has one.
+
+    A log handler that fails here must not keep the reader from ending (it
+    runs on the reader's way out, `_drop_listing`) or fail the helper thread.
+    """
     try:
         error = listing.errors.pop()
     except IndexError:
         return
-    _LOG.error(
-        "%s: the regular package list failed after the reader had ended",
-        unit.serial,
-        exc_info=error,
-    )
+    with contextlib.suppress(Exception):  # the reader must still end
+        _LOG.error(
+            "%s: the regular package list failed after the reader had ended",
+            unit.serial,
+            exc_info=error,
+        )
 
 
 def _run_list_commands(core: _Core, unit: _Unit, listing: _Listing) -> None:
@@ -945,8 +952,9 @@ def _run_list_commands(core: _Core, unit: _Unit, listing: _Listing) -> None:
     A command cut by the stop flag, by ``abandoned`` or by the deadline fails
     the list as late. Once abandoned, or after a kill, the outcome is not used.
     After a stop a list that succeeded (its last command ended before the stop
-    could cut it) is still handed over as the reader ends (`_settle_listing`),
-    and a failed one, a command cut short by the stop included, is discarded.
+    could cut it) is still handed over as the reader ends if this thread has
+    ended by then (`_settle_listing`); a failed one, a command cut short by
+    the stop included, is discarded.
     The pacing to the next list counts from when the first command starts.
     """
     job = listing.job
@@ -2245,9 +2253,11 @@ class LogStream:
         With ``on_entry``, this also waits until the queued entries were given
         to the callback. Without it, readers can end only when the queue is
         consumed or the stream is stopped. It also waits for the helper
-        thread of a package list that a reader left running when it ended
-        (at most 0.25 seconds after that reader's end), so no thread of the
-        stream is left when it returns.
+        thread of a package list that a reader left running when it ended,
+        so no thread of the stream is left when it returns. That thread
+        checks every 0.25 seconds of blocking I/O whether its reader ended,
+        and may take longer while it parses the output; pass ``timeout`` for
+        a deadline.
 
         Raises:
             TimeoutError: ``timeout`` seconds passed; the stream keeps running.
@@ -2283,7 +2293,8 @@ class LogStream:
     def _left_threads(self) -> list[threading.Thread]:
         """The threads of the regular lists the ended readers left running.
 
-        Each gives up within ``_adb.TICK`` seconds of its reader's end.
+        Each gives up at its next check, within ``_adb.TICK`` seconds of its
+        reader's end while it waits for I/O (parsing output takes longer).
         """
         return [
             unit.left_listing.thread
@@ -2295,7 +2306,7 @@ class LogStream:
         """Wait for ``threads`` in slices of ``TICK``.
 
         On Ctrl-C the stream is killed, and the readers and the helper
-        threads of the package lists (which end within ``TICK`` of the kill)
+        threads of the package lists (which give up at their next check)
         are waited for before the interrupt goes on; the consumer is not, as
         its callback may never return.
         """
@@ -2580,11 +2591,15 @@ def stream(
     2048 lines in parts). The two may then deliver different lines and count
     different lines as unattributed, but each counts every line it judged
     with a list that the new one shows was outdated. Stopping or killing the
-    stream does not wait for it, nor does a flush, the start marker or a reader
-    that ends (``join`` of the blocking stream waits for the helper thread to
-    leave, which takes at most 0.25 seconds once the reader ended). A read
-    whose list did not come in time (an answer that is ready only after the
-    read's time, the flush budget or the start marker's time counts as not in
+    stream does not wait for it, nor does a request for a flush, the start
+    marker or a reader that ends; but a line before the flush marker that
+    needs a list makes the reader wait for it within the flush budget, and the
+    flush ends ``timed_out`` when the budget runs out first. ``join`` of the
+    blocking stream waits for the helper thread to leave: it checks every 0.25
+    seconds of blocking I/O whether the reader ended, and may take longer
+    while it parses the output (use ``join(timeout=...)`` for a deadline). A
+    read whose list did not come in time (an answer that is ready only after
+    the read's time, the flush budget or the start marker's time counts as not in
     time), or failed, is delivered as if no package owned its undecided lines,
     and those lines are counted in the device's ``unattributed`` (the summary
     is then incomplete). A list that fails, or is cut by a time limit, leaves
@@ -2592,11 +2607,12 @@ def stream(
     list that ends that time, but starts none): the last list that succeeded
     still decides the apps it names, and the lines it cannot decide are counted
     (before any list succeeded, every line of an app id from 10000 to 19999
-    whose verdict depends on its app is, and the lines of other uids are
-    counted when the first list that succeeds shows a watched app under their
-    uid). After a list shows that a watched app got a new uid or was removed,
-    every line of its old uid (a system uid too, and whatever else the
-    condition asks about it) is counted the same way until a list that started
+    whose verdict depends on its app is, also one older than the device
+    clock, and the lines of other uids are counted when the first list that
+    succeeds shows a watched app under their uid). After a list shows that a
+    watched app got a new uid or was removed, every line of its old uid (a
+    system uid too, and whatever else the condition asks about it) is counted
+    the same way until a list that started
     30 seconds or more after that one (normally the next list taken every 30
     seconds; a list taken for a read in between does not end it) or that shows
     a watched app under that uid, since they may be late lines of the app. A
@@ -2609,10 +2625,11 @@ def stream(
     lines of an app that is not watched, installed and removed meanwhile, and
     those of an app id that no list ever names (perhaps an app installed only
     for another user, which is not verified) for as long as the stream runs. A
-    WARNING says so, once per device for the first failed list and once for the
-    first such line. ``entries`` in the summary counts the delivered entries.
-    Lines of a watched app's isolated processes (such as a WebView renderer,
-    app ids 90000 to 99999) are not attributed to the app, and how an app
+    WARNING says so, once per device for the first failed list, and once for
+    the device's first unattributed line, naming its cause. ``entries`` in
+    the summary counts the delivered entries. Lines of a watched app's
+    isolated processes (such as a WebView renderer, app ids 90000 to 99999)
+    are neither attributed to the app nor counted, and how an app
     installed only for a secondary user is listed is not verified; see
     `Package` for the rest of what is not promised. An adb error while the list
     is read fails ``start()``; while reading it counts as a failed list.

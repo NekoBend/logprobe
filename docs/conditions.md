@@ -273,9 +273,12 @@ How the app of a line is found:
   device (secondary users) are matched by app id.
 - A line without a uid belongs to no watched package.
 
-A line's verdict depends on its app when a term without packages does not
-settle it: under `Package(a) | Tag("x")`, a line tagged `x` is delivered
-whatever its app, and it never needs a list.
+A line's verdict depends on its app when the condition, evaluated with the
+line's app unknown (three-valued: true, false or undecided), is undecided:
+under `Package(a) | Tag("x")`, a line tagged `x` is delivered whatever its
+app, and it never needs a list. The evaluation looks only at the terms, so
+under `Package(a) | ~Package(a)` every line's verdict depends on its app,
+although each line is delivered either way.
 
 A stream counts in its device summary's `unattributed` the lines whose app
 it could not check, which makes the summary incomplete (`complete` is
@@ -284,7 +287,10 @@ it could not check, which makes the summary incomplete (`complete` is
 - a line that needs a list, when the device has no usable list (the last
   list failed; the next one comes 30 seconds later), or when the list for its
   read did not come within the 2 seconds. Such a line is judged as if no
-  package owned it.
+  package owned it. After a failed list the last list that succeeded still
+  decides the app ids it names; when the first list fails, every line whose
+  verdict depends on its app and whose app id is from 10000 to 19999 counts,
+  also one logged before the clock read before that list.
 - a line whose verdict depends on its app, when the list taken for its read
   does not name its app id either and it was logged at or after the clock read
   before the first list (any such line with `since="now"` or when that clock
@@ -318,7 +324,7 @@ Not promised:
 
 - Telling apart packages that share a uid.
 - Attributing the lines of an app's isolated processes (app ids 90000 to
-  99999, for example a WebView renderer) to the app.
+  99999, for example a WebView renderer) to the app, or counting them.
 - Attributing an app installed only for a secondary user: how such an app is
   listed is not verified.
 - Lines of a removed app in the backlog belong to no watched package. A step
@@ -329,7 +335,9 @@ Not promised:
 - A watched app that no list ever names (installed after one list and removed
   before the list taken for a read of its lines) is not attributed: its lines
   are judged as if no package owned them, and counted as above unless they
-  look older than that clock.
+  look older than that clock. When that list names their app id (another app
+  got it after the watched app was removed), they are judged as that app's
+  lines and not counted.
 - A dump judges by the list read just before it.
 - A stream does not read a device while it takes the list at the start (at
   most 5 seconds) or for a read. An older logd may skip lines then, and

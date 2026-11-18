@@ -2344,6 +2344,62 @@ def test_a_regular_list_that_failed_unexpectedly_by_the_readers_end_is_logged(
     assert s.summary.devices[0].error is None
 
 
+def test_a_failing_log_handler_on_a_failed_list_at_the_readers_end_ends_it(
+    server: FakeAdbServer,
+    mode: Mode,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """As in the test of a list helper that failed unexpectedly, but the log
+    handler fails on the ERROR that reports it: the reader still ends, so the
+    iteration ends instead of waiting for the device's end, and the failure
+    does not reach the event loop either."""
+    regular_soon(monkeypatch)
+    hold = held_tending(monkeypatch)
+    started = threading.Event()
+    go = threading.Event()
+    ago = asyncio.Event()  # set on the stream's loop
+
+    def bug(*_args: object) -> None:
+        started.set()
+        go.wait(GUARD)
+        msg = "a bug in the list"
+        raise RuntimeError(msg)
+
+    async def abug(*_args: object) -> None:
+        started.set()
+        await ago.wait()
+        msg = "a bug in the list"
+        raise RuntimeError(msg)
+
+    async def let_abug_go() -> None:
+        ago.set()
+
+    monkeypatch.setattr(_stream, "_run_list_commands", bug)
+    monkeypatch.setattr(_astream, "_run_listing", abug)
+    s = begin(server, mode, Package(A), uids={A: APP_A})
+    assert started.wait(GUARD)
+    no_more_regular(monkeypatch)
+    hold.set()
+    go.set()
+    if mode._loop is not None:
+        mode._loop.call(let_abug_go())
+    wait_until(lambda: list_ended(s))
+    handler = FailingHandler()
+    logger = logging.getLogger("logprobe")
+    logger.addHandler(handler)
+    try:
+        s.stop()
+        with kill_if_hung(s):
+            assert list(s.items()) == []
+        s.join(GUARD)
+    finally:
+        logger.removeHandler(handler)
+    assert handler.failed == 1
+    assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+    assert s.summary.devices[0].error is None
+
+
 @pytest.mark.parametrize("mode", ["async"], indirect=True)
 def test_an_asyncio_reader_awaits_its_dropped_list_before_it_ends(
     server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch

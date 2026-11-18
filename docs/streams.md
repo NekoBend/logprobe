@@ -416,7 +416,9 @@ before the start marker of `since="now"`:
   `pm` prints that it does not know `-U` or prints no usable list. The list
   has 5 seconds in all. When it fails (a non-zero exit status, none at all, no
   usable output, or no time left), the stream starts anyway, and the device has
-  no list for 30 seconds.
+  no list for 30 seconds: every line of an app id from 10000 to 19999 whose
+  verdict depends on its app is counted as `unattributed` then, also one
+  logged before the clock read by `date +%s`.
 
 An adb error in either command fails `start()`.
 
@@ -425,15 +427,20 @@ While reading, the stream takes the list again:
 - every 30 seconds, in the background: on a short-lived helper thread
   `logprobe-list-<serial>` in the blocking stream, on a task of that name in
   the asyncio stream. It has 5 seconds, and the reader goes on reading
-  meanwhile. `stop()`, `kill()` and a flush do not wait for it; `join()` of
-  the blocking stream waits for the helper thread, at most 0.25 seconds once
-  the reader ended.
+  meanwhile. `stop()`, `kill()` and `stop(flush=...)` return without waiting
+  for it, but a line before the flush marker that needs a list makes the
+  reader wait for it within the flush budget; when the budget runs out first,
+  the flush ends `timed_out`. `join()` of the blocking stream waits for the
+  helper thread, which checks every 0.25 seconds of blocking I/O whether the
+  reader ended and may take longer while it parses the output; use
+  `join(timeout=...)` for a deadline.
 - for a read with a line that needs a list, at most once in 0.5 seconds.
   Reading that device pauses for at most 2 seconds.
 
 A list that fails while reading, an adb error included, does not end the
-stream: the lines that needed it are counted as `unattributed`, and the device
-has no new list for 30 seconds.
+stream, and the device gets no new list for 30 seconds: the last list that
+succeeded still decides the app ids it names, and the lines it cannot decide
+are counted as `unattributed`.
 
 The stream logs these messages per device, through the `logprobe` loggers:
 

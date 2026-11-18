@@ -32,10 +32,11 @@ not accepted while logprobe is in alpha.
 
 ## Known gaps
 
-- Filtering by app does not attribute the lines of a watched app's isolated
-  processes, such as a WebView renderer. How an app installed only for another
-  user is listed is not verified. A stream counts the lines it could not
-  attribute in its summary; see [Package](docs/conditions.md#package).
+- Filtering by app neither attributes nor counts the lines of a watched app's
+  isolated processes, such as a WebView renderer. How an app installed only
+  for another user is listed is not verified. A stream counts the other lines
+  it could not attribute in its summary, with the exceptions listed under
+  [Package](docs/conditions.md#package).
 - The tests use a fake adb server and logcat output recorded on Android 7.0
   (API 24) and API 36 emulators. Physical devices and other Android versions
   are untested.
