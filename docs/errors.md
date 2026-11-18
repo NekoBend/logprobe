@@ -44,7 +44,7 @@ every key is present in every case.
 | [`adb_error`](#adb_error) | The adb server refused a request, broke the protocol, or did not answer. |
 | [`device_lost`](#device_lost) | The connection to the device ended and did not come back. |
 | [`logcat_failed`](#logcat_failed) | logcat on the device ended with an error. |
-| [`device_command_failed`](#device_command_failed) | A device command that `since="now"` needs failed. |
+| [`device_command_failed`](#device_command_failed) | A device command that `since="now"`, or the package list of a dump, needs failed. |
 | [`internal_error`](#internal_error) | A stream reader failed unexpectedly: a bug in logprobe. |
 
 ### `usage_error`
@@ -197,15 +197,24 @@ logcat on the device exited with an error.
 
 ### `device_command_failed`
 
-Only streams with `since="now"` raise this. Such a stream runs `date +%s` on
-each device and writes a start marker with the device's `log` command. The
-code is raised:
+Raised in two places:
 
-- when the stream starts, if one of these commands exits with a non-zero
-  status, ends without an exit status, does not finish within 5 seconds, or
-  `date` does not print a time;
-- while the stream runs, if the start marker does not come back within 10
+- A stream with `since="now"` runs `date +%s` on each device and writes a
+  start marker with the device's `log` command. It raises this code when it
+  starts, if one of these commands exits with a non-zero status, ends without
+  an exit status, does not finish within 5 seconds, or `date` does not print
+  a time; and while it runs, if the start marker does not come back within 10
   seconds of connecting.
+- `Device.dump()` and `Device.adump()` with a `Package` term or `package=`
+  take the device's package list before `logcat -d`. They raise this code when
+  the list fails: its command exits with a non-zero status, ends without an
+  exit status, prints no usable list, or does not finish within 5 seconds.
+  `command` is the last command run (`pm list packages -U` or
+  `dumpsys package packages`).
+
+A stream's package list never raises it: a list that fails leaves the device
+without a list for a while (see
+[streams.md](streams.md#filter-by-app-extra-commands-and-messages)).
 
 | Key | Value |
 | --- | --- |
@@ -234,7 +243,7 @@ logprobe. The stream ends with this error, and the original exception is its
 | `devices()` | `usage_error`, `adb_server_unavailable`, `adb_error` |
 | `Device(...)` | `usage_error`, `adb_server_unavailable`, `device_not_found`, `multiple_devices`, `device_offline`, `device_unauthorized`, `adb_error` |
 | `device.features()`, `device.shell()` | `adb_server_unavailable`, `device_not_found`, `device_offline`, `device_unauthorized`, `adb_error` |
-| `device.dump()`, `await device.adump()` | the codes of `shell()`, plus `logcat_failed` and `device_lost` |
+| `device.dump()`, `await device.adump()` | the codes of `shell()`, plus `logcat_failed`, `device_lost` and `device_command_failed` |
 | `stream.start()` or entering the `with` block | the codes of `shell()`, plus `device_command_failed` |
 | iterating, `join()`, leaving the `with` block | `device_lost`, `logcat_failed`, `adb_server_unavailable`, `adb_error`, `device_command_failed`, `internal_error` |
 
@@ -271,7 +280,6 @@ In other places, a timeout while connecting to the adb server becomes
 | --- | --- |
 | `TypeError` | An argument has the wrong type. A `bool` is rejected where logprobe checks for a number, for example `tail`, `reconnect`, `buffer_lines`, `buffer_bytes` and `stop(flush=...)`. |
 | `ValueError` | An argument has a bad value: a malformed `adb_server`, an empty serial, a `tail` below 1, an out-of-range stream option, an empty device list or a repeated serial. |
-| `NotImplementedError` | A condition uses `Package`, or the `package=` shortcut is given. Raised by `Device.dump()`, `Device.adump()`, `stream()` and `astream()`. |
 | `RuntimeError` | A stream is misused: started twice, iterated or joined before it started, iterated twice at once, iterated when `on_entry` was given, or `join()` was called from inside `on_entry`. |
 
 An exception raised by your `on_entry` callback stops the stream, and

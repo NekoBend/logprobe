@@ -20,7 +20,17 @@ def test_the_since_time_is_one_second_before_the_device_clock() -> None:
 
 @pytest.mark.parametrize(
     ("output", "clock"),
-    [(b"1700000000\n", 1_700_000_000), (b"", None), (b"soon\n", None), (b"-5\n", None)],
+    [
+        (b"1700000000\n", 1_700_000_000),
+        (b"", None),
+        (b"soon\n", None),
+        (b"-5\n", None),
+        (b"253402300799\n", 253_402_300_799),  # the last second of 9999
+        (b"253402300800\n", None),
+        (b"0253402300799\n", None),
+        (b"9" * 400 + b"\n", None),  # beyond a float
+        (b"9" * 5000 + b"\n", None),  # beyond what int() reads from text
+    ],
 )
 def test_the_device_clock_is_read_from_the_output_of_date(
     output: bytes, clock: int | None
@@ -138,3 +148,15 @@ def test_nothing_after_the_flush_marker_is_kept_and_the_flush_is_done() -> None:
     assert marks.route([entries("d")]) == []
     assert marks.dropped == 3
     assert marks.step(0.0, 0.0).act is Act.END
+
+
+def test_a_flush_that_timed_out_stays_timed_out_when_its_marker_comes_later() -> None:
+    # The budget ran out while the first part of a read waited (for a package
+    # list, say); a later part of the same read then brings the marker.
+    marks = pending(1.0)
+    assert marks.left(1.5, 0.0) == 0.0
+    assert marks.state == "timed_out"
+    kept = marks.route([MarkerArrived(FLUSH), entries("after")])
+    assert kept == []
+    assert marks.phase is Phase.CLOSED
+    assert marks.state == "timed_out"

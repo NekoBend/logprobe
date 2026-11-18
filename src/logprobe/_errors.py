@@ -65,3 +65,36 @@ class LogprobeError(Exception):
         if self.details:
             return f"LogprobeError({self.code!r}, {self.message!r}, {self.details!r})"
         return f"LogprobeError({self.code!r}, {self.message!r})"
+
+
+#: How many lines of a device command's stderr an error keeps (the last ones).
+STDERR_LINES = 20
+
+
+def command_failed(
+    serial: str,
+    argv: list[str],
+    exit_status: int | None,
+    stderr: bytes = b"",
+    *,
+    outcome: str | None = None,
+) -> LogprobeError:
+    """The ``device_command_failed`` error for a device command that failed.
+
+    ``outcome`` says what went wrong when the exit status does not (a timeout,
+    output that could not be read). ``details`` has ``serial``, ``command``,
+    ``exit_status`` and ``stderr`` (its last `STDERR_LINES` lines).
+    """
+    if outcome is None:
+        outcome = f"did not succeed (exit status {exit_status})"
+    tail = stderr.decode("utf-8", "replace").splitlines()[-STDERR_LINES:]
+    return LogprobeError(
+        "device_command_failed",
+        f"the command {' '.join(argv)!r} on {serial} {outcome}",
+        {
+            "serial": serial,
+            "command": argv,
+            "exit_status": exit_status,
+            "stderr": tail,
+        },
+    )

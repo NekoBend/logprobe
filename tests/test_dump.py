@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import gc
 import itertools
+import logging
 import shlex
 import threading
 from typing import TYPE_CHECKING
@@ -33,9 +34,10 @@ from logprobe import (
     _adb,
     _adump,
     _dump,
+    _marks,
 )
 from logprobe._framing import MIN_MAX_LINE_BYTES
-from tests.fake_adb_server import FakeAdbServer, ShellScript, Wait, program_of
+from tests.fake_adb_server import Cut, FakeAdbServer, ShellScript, Wait, program_of
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator
@@ -431,7 +433,7 @@ def test_waits_are_sliced(
         ({"level": "Z"}, ValueError),
         ({"tag": []}, ValueError),
         ({"pid": "1"}, TypeError),
-        # A bad tail wins over the unsupported package filter in both versions.
+        # A bad tail is found before the package list is read.
         ({"tail": 0, "package": "a.b"}, ValueError),
     ],
 )
@@ -454,24 +456,253 @@ def test_tail_one_is_accepted(fake: FakeAdbServer, device: Device, dump: Dump) -
     assert len(dump(device, tail=1)) == 1
 
 
+# --- conditions on the app ------------------------------------------------------
+
+# `pm list packages -U` for the tests below: line() writes uid 10146.
+PM_LIST = (
+    b"package:com.example uid:10146\npackage:a.b uid:10146\npackage:c.d uid:10200\n"
+)
+
+
+def programs(fake: FakeAdbServer) -> list[str]:
+    return [program_of(r.command).split()[0] for r in fake.records]
+
+
 @pytest.mark.parametrize(
-    "kwargs",
+    ("kwargs", "kept"),
     [
-        {"package": "com.example"},
-        {"package": ["a.b", "c.d"]},
-        {"where": Package("a.b")},
-        {"where": Not(Package("a.b"))},
-        {"where": Tag("x") & (Pid(1) | Package("a.b")), "level": "W"},
+        ({"package": "com.example"}, ["a", "b"]),
+        ({"package": ["a.b", "c.d"]}, ["a", "b"]),
+        ({"where": Package("a.b")}, ["a", "b"]),
+        ({"where": Not(Package("a.b"))}, ["other"]),
+        ({"where": Tag("x") & (Pid(1) | Package("a.b")), "level": "W"}, ["b"]),
     ],
 )
-def test_package_condition_is_not_implemented(
-    fake: FakeAdbServer, device: Device, dump: Dump, kwargs: dict[str, object]
+def test_dump_with_a_package_reads_the_list_once_before_logcat(
+    fake: FakeAdbServer,
+    device: Device,
+    dump: Dump,
+    kwargs: dict[str, object],
+    kept: list[str],
 ) -> None:
-    requests = list(fake.requests)
-    with pytest.raises(NotImplementedError, match="package"):
-        dump(device, **kwargs)
-    assert fake.requests == requests
+    fake.answer("pm list packages -U", PM_LIST)
+    other = line(3, "other").replace(" 10146 ", " 10300 ")
+    script(fake, ("stdout", text(line(1, "a", "x"), line(2, "b", "x", "W"), other)))
+    entries = dump(device, **kwargs)
+    assert [e.message for e in entries] == kept
+    assert programs(fake) == ["pm", "logcat"]
+    assert program_of(fake.records[0].command) == "pm list packages -U"
+    closed(fake)
+
+
+@pytest.mark.parametrize("level", [24, 36])
+def test_dump_on_the_recorded_devices_keeps_the_lines_of_the_watched_package(
+    fake: FakeAdbServer, device: Device, dump: Dump, level: int
+) -> None:
+    from tests.device_facts import level_dir, load, step
+
+    rec = load(level_dir(level), "C03")
+    if level == 24:
+        # Android 7 does not know -U and still exits with status 0.
+        fake.answer("pm list packages -U", b"Error: Unknown option: -U\n")
+        listing = step(rec, "dumpsys_package_packages")["stdout"]
+        fake.answer("dumpsys package packages", "\n".join(listing).encode())
+        watched, uid = "com.google.android.gsf", 10014
+    else:
+        listing = step(rec, "pm_list_packages_U")["stdout"]
+        fake.answer("pm list packages -U", "\n".join(listing).encode())
+        watched, uid = "com.google.android.gms", 10146
+    backlog = step(rec, "dump")["stdout"]
+    script(fake, ("stdout", text(*backlog)))
+    entries = dump(device, Package(watched))
+    assert [(e.uid, e.package) for e in entries] == [(uid, watched)]
+    expected = ["pm", "dumpsys", "logcat"] if level == 24 else ["pm", "logcat"]
+    assert programs(fake) == expected
+
+
+def test_dump_shared_uid_sets_the_first_watched_package_by_name(
+    fake: FakeAdbServer, device: Device, dump: Dump
+) -> None:
+    fake.answer("pm list packages -U", PM_LIST)
+    script(fake, ("stdout", text(line(1, "a"))))
+    (only,) = dump(device, Package("com.example", "a.b"))
+    assert only.package == "a.b"
+    script(fake, ("stdout", text(line(1, "a"))))
+    assert [e.package for e in dump(device, Package("com.example"))] == ["com.example"]
+
+
+def test_dump_judges_unlisted_apps_without_a_second_list(
+    fake: FakeAdbServer, device: Device, dump: Dump
+) -> None:
+    fake.answer("pm list packages -U", b"package:c.d uid:10200\n")
+    script(fake, ("stdout", text(line(1, "new app"))))  # uid 10146: not listed
+    assert [e.message for e in dump(device, Not(Package("c.d")))] == ["new app"]
+    assert programs(fake) == ["pm", "logcat"]
+
+
+def test_dump_tail_with_a_package(
+    fake: FakeAdbServer, device: Device, dump: Dump
+) -> None:
+    fake.answer("pm list packages -U", PM_LIST)
+    script(fake, ("stdout", text(line(1, "a"))))
+    assert [e.message for e in dump(device, package="a.b", tail=5)] == ["a"]
+    assert programs(fake) == ["pm", "logcat"]
+    assert shlex.split(program_of(fake.records[1].command))[-3:] == ["-d", "-t", "5"]
+
+
+def test_dump_logs_missing_and_system_uid_packages(
+    fake: FakeAdbServer,
+    device: Device,
+    dump: Dump,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="logprobe")
+    fake.answer("pm list packages -U", b"package:com.android.settings uid:1000\n")
+    settings_line = line(1, "s").replace(" 10146 ", "  1000 ")
+    script(fake, ("stdout", text(settings_line)))
+    entries = dump(device, Package("com.android.settings", "gone.app"))
+    assert [e.package for e in entries] == ["com.android.settings"]
+    assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+        (
+            logging.INFO,
+            f"gone.app is not installed on {SERIAL}; the dump has no lines of it",
+        ),
+        (
+            logging.WARNING,
+            f"{SERIAL}: com.android.settings runs under the system uid 1000: "
+            "every process of that uid is taken as belonging to it",
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("answers", "message", "exit_status", "stderr"),
+    [
+        (
+            {"pm list packages -U": ShellScript([("stderr", b"boom\n")], 1)},
+            "the command 'pm list packages -U' on emulator-5554 did not succeed "
+            "(exit status 1)",
+            1,
+            ["boom"],
+        ),
+        (
+            {"pm list packages -U": ShellScript([], None)},
+            "the command 'pm list packages -U' on emulator-5554 ended without "
+            "an exit status",
+            None,
+            [],
+        ),
+        (
+            {
+                "pm list packages -U": ShellScript(
+                    [("stdout", b"Error: Unknown option: -U\n")]
+                ),
+                "dumpsys package packages": ShellScript(
+                    [("stdout", b"Error: Could not access the Package Manager\n")]
+                ),
+            },
+            "the command 'dumpsys package packages' on emulator-5554 printed no "
+            "package list",
+            0,
+            [],
+        ),
+        (
+            {"pm list packages -U": ShellScript([Wait("never")])},
+            "the command 'pm list packages -U' on emulator-5554 did not finish "
+            "within 0.5 seconds",
+            None,
+            [],
+        ),
+        (
+            {
+                "pm list packages -U": ShellScript(
+                    [
+                        ("stderr", b"".join(b"line %d\n" % n for n in range(25))),
+                        ("stderr", b"Error: still waiting\n"),
+                        Wait("never"),
+                    ]
+                )
+            },
+            "the command 'pm list packages -U' on emulator-5554 did not finish "
+            "within 0.5 seconds",
+            None,
+            [*(f"line {n}" for n in range(6, 25)), "Error: still waiting"],
+        ),
+        (
+            # A whole line of a stderr packet came, the rest of it never does.
+            {
+                "pm list packages -U": ShellScript(
+                    [Cut("stderr", b"Error: half way\n" + b"x" * 40, 21, "never")]
+                )
+            },
+            "the command 'pm list packages -U' on emulator-5554 did not finish "
+            "within 0.5 seconds",
+            None,
+            ["Error: half way"],
+        ),
+        (
+            # A whole line of a stderr packet came, then the connection ended.
+            {
+                "pm list packages -U": ShellScript(
+                    [Cut("stderr", b"Error: half way\n" + b"x" * 40, 21)]
+                )
+            },
+            "the command 'pm list packages -U' on emulator-5554 ended without "
+            "an exit status",
+            None,
+            ["Error: half way"],
+        ),
+    ],
+    ids=[
+        "exit-1",
+        "no-exit-status",
+        "unusable-output",
+        "hangs",
+        "stderr-then-hangs",
+        "stderr-packet-hangs",
+        "stderr-packet-disconnects",
+    ],
+)
+def test_dump_with_a_failed_list_raises_device_command_failed(
+    fake: FakeAdbServer,
+    device: Device,
+    dump: Dump,
+    monkeypatch: pytest.MonkeyPatch,
+    answers: dict[str, ShellScript],
+    message: str,
+    exit_status: int | None,
+    stderr: list[str],
+) -> None:
+    monkeypatch.setattr(_marks, "COMMAND_LIMIT", 0.5)
+    fake.oneoff.update(answers)
+    script(fake, ("stdout", text(line(1, "a"))))
+    with pytest.raises(LogprobeError) as info:
+        dump(device, package="a.b")
+    error = info.value
+    assert error.code == "device_command_failed"
+    assert str(error) == message
+    command = message.split("'")[1].split()
+    assert error.details == {
+        "serial": SERIAL,
+        "command": command,
+        "exit_status": exit_status,
+        "stderr": stderr,
+    }
+    assert "logcat" not in programs(fake)
+    closed(fake)
+
+
+def test_dump_with_an_adb_error_during_the_list_raises_it(
+    fake: FakeAdbServer, device: Device, dump: Dump
+) -> None:
+    request = 'shell,v2,raw:export ANDROID_LOG_TAGS=""; exec pm list packages -U'
+    fake.fail[request] = "device offline"
+    with pytest.raises(LogprobeError) as info:
+        dump(device, package="a.b")
+    assert info.value.code == "device_offline"
+    assert info.value.details["serial"] == SERIAL
     assert fake.records == []
+    closed(fake)
 
 
 def test_anr_with_package_is_allowed(
@@ -479,6 +710,7 @@ def test_anr_with_package_is_allowed(
 ) -> None:
     script(fake, ("stdout", text(line(1, "a"))))
     assert dump(device, Anr("com.example")) == []
+    assert programs(fake) == ["logcat"]  # no package list
 
 
 def test_a_chatty_notice_is_an_entry_of_a_dump_and_makes_no_gap(
@@ -562,7 +794,32 @@ def test_adump_starts_no_thread(
     monkeypatch.setattr(threading.Thread, "start", spy)
     script(fake, ("stdout", text(line(1, "a"), line(2, "b"))))
     assert [e.message for e in run(device.adump())] == ["a", "b"]
+    fake.answer("pm list packages -U", PM_LIST)
+    script(fake, ("stdout", text(line(1, "a"), line(2, "b"))))
+    assert [e.message for e in run(device.adump(package="a.b"))] == ["a", "b"]
     assert started == []
+
+
+def test_a_cancelled_adump_during_the_list_closes_everything(
+    fake: FakeAdbServer,
+    device: Device,
+    streams: list[_adb.ShellStream | _aadb.AsyncShellStream],
+) -> None:
+    fake.oneoff["pm list packages -U"] = ShellScript([Wait("list")])
+    script(fake, ("stdout", text(line(1, "a"))))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(device.adump(package="a.b"))
+        while not fake.wait_reached("list", 0):  # noqa: ASYNC110  (the fake's thread)
+            await asyncio.sleep(0.005)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    run(scenario())
+    assert streams == []  # logcat was never opened
+    assert programs(fake) == ["pm"]
+    closed(fake)
 
 
 class _ReadyStream:
@@ -580,6 +837,9 @@ class _ReadyStream:
 
     def set_timeout(self, timeout: float | None) -> None:
         pass  # no read waits
+
+    def needs_read(self) -> bool:
+        return False  # all of it came with one network read
 
     async def read_part(self) -> tuple[str, bytes] | None:
         if self._events:

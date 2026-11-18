@@ -310,14 +310,15 @@ def test_the_stream_is_not_started_and_connects_to_nothing(
         {"where": Tag("x"), "package": "com.example"},
     ],
 )
-def test_package_conditions_are_not_implemented_yet(
+def test_package_conditions_are_accepted_and_connect_to_nothing_before_start(
     server: FakeAdbServer, mode: Mode, kwargs: dict[str, Any]
 ) -> None:
     (device,) = attach(server, "a")
-    with pytest.raises(NotImplementedError, match="Package"):
-        mode.device_stream(device, **kwargs)
-    with pytest.raises(NotImplementedError):
-        mode.stream([device], **kwargs)
+    before = list(server.requests)
+    for s in (mode.device_stream(device, **kwargs), mode.stream([device], **kwargs)):
+        assert s._core.units[0].attributor is not None
+    assert server.requests == before
+    assert server.records == []
 
 
 def test_public_names() -> None:
@@ -1890,6 +1891,9 @@ def test_crash_and_anr_with_a_package_filter_without_attribution(
     assert got == expected
     assert s.summary.devices[0].entries == 1
     assert s.summary.devices[0].lines == 5
+    # These terms read the message text: no package list, no clock.
+    assert [program_of(r.command).split()[0] for r in server.records] == ["logcat"]
+    assert s._core.units[0].attributor is None
 
 
 def test_crash_and_anr_with_a_package_combine_with_shortcuts(

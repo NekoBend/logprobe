@@ -1097,8 +1097,8 @@ def after_queueing(
             done.append(True)
             action()
 
-    def hooked(core: Any, unit: Any, run: Any, chunks: Any) -> None:  # noqa: ANN401
-        queue_read(core, unit, run, chunks)
+    def hooked(core: Any, unit: Any, run: Any, chunks: Any, received: Any) -> None:  # noqa: ANN401
+        queue_read(core, unit, run, chunks, received)
         fire(chunks)
 
     async def ahooked(core: Any, unit: Any, run: Any, chunks: Any, batch: Any) -> None:  # noqa: ANN401

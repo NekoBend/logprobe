@@ -9,9 +9,12 @@ all readers share. When a connection ends, the reader decides from ``_resume``
 markers and a flush from ``_marks`` (pure code as well); it only measures
 times, waits in slices of ``TICK`` and does the I/O. The consumer is either the
 caller (iterating the stream) or one extra thread (``logprobe-consumer``) that
-calls ``on_entry`` for every entry. There are no other threads. A reader runs
-the one-shot commands it needs (the flush marker) itself, one at a time; while
-one runs, that device's logcat is not read.
+calls ``on_entry`` for every entry. A reader runs the one-shot commands it
+needs (the flush marker, a package list for a read) itself, one at a time;
+while one runs, that device's logcat is not read. The one exception is the
+package list taken every 30 seconds with a condition on the app: it runs on a
+short-lived helper thread (``logprobe-list-<serial>``) that exists only while
+that list runs, and the reader goes on reading. There are no other threads.
 
 Threads and shared state
 ------------------------
@@ -46,6 +49,13 @@ Threads and shared state
     both write, but never at the same time (``start()`` writes it only for a
     failure before any reader started).
 
+- A helper thread of the package list only runs the list's commands and
+  fills in its `ListJob`. The reader alone hands the job to the device's
+  attributor, after the thread ended, so the attributor has one writer. When
+  the reader ends it tells the thread to give up and does not wait for it, so
+  the end of the device is queued at once; the thread ends within ``TICK``
+  seconds (the slice of its command's waits), and ``join`` waits for it after
+  the readers, so no thread of the stream is left once ``join`` returned.
 - This is verified on CPython with the global interpreter lock. The
   free-threaded build is not verified. The guarantee of ``kill()`` allows for
   one entry in flight, so it does not rely on a thread switch never happening
@@ -67,6 +77,7 @@ here for the threads and in ``_astream`` for the tasks.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import math
 import threading
@@ -76,14 +87,18 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum, auto
+from functools import partial
 from time import monotonic, perf_counter
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, Self, cast
 
-from . import _adb, _marks
+from . import _adb, _attribution, _marks
 from ._adb import RECV_SIZE, TICK, ShellStream, ShellV2Decoder, logcat_argv
+from ._attribution import Listed, ListJob, PackageAttributor
 from ._conditions import build_condition
 from ._device import Device
+from ._errors import STDERR_LINES as _STDERR_LINES
 from ._errors import LogprobeError
+from ._errors import command_failed as _command_failed
 from ._feed import Feeder, new_marker
 from ._marks import Act, FlushRequest, Marks, Phase, Step
 from ._outbox import STALLED, Outbox, _Ledger
@@ -119,10 +134,10 @@ if TYPE_CHECKING:
 MAX_LINE_BYTES = 64 * 1024
 
 _MIN_BUFFER_BYTES = 65536
-_STDERR_LINES = 20
 _STDERR_LINE_BYTES = 1024
 _STDERR_LOG_RATE = 10  # lines per second
 _SDK_COMMAND = ("getprop", "ro.build.version.sdk")
+_BOUNDARY_COMMAND = ("date", "+%s")
 _LOG = logging.getLogger(__name__)
 
 __all__ = ["LogStream", "stream"]
@@ -147,11 +162,15 @@ class _Unit:
     """One device of a stream: its feeder, connection, thread and summary fields."""
 
     __slots__ = (
+        "attributor",
         "conn",
+        "delivered",
         "device",
         "ended_at",
         "error",
         "feeder",
+        "left_listing",
+        "listing",
         "marks",
         "reconnect",
         "serial",
@@ -183,21 +202,37 @@ class _Unit:
         # Seconds the reader may wait for room before it closes its connection
         # itself (``detect_skips`` on an older logd); None: as long as it takes.
         self.stall_after: float | None = None
+        # Decides the lines of a condition on the app; the feeder then passes
+        # every line, and the entries it delivers are counted here.
+        self.attributor = (
+            PackageAttributor(condition, serial=device.serial)
+            if condition is not None and condition._has_package()
+            else None
+        )
+        self.delivered = 0
+        # The regular package list while it runs beside the reader.
+        self.listing: _Listing | None = None
+        # A regular list the reader told to give up when it ended; its thread
+        # may still be running (`LogStream.join` waits for it).
+        self.left_listing: _Listing | None = None
 
     def summary(self) -> DeviceSummary:
         feeder = self.feeder
+        attributor = self.attributor
         return DeviceSummary(
             serial=self.serial,
             started_at=self.started_at,
             ended_at=self.ended_at,
             lines=feeder.lines,
-            entries=feeder.entries - self.marks.dropped,
+            entries=feeder.entries - self.marks.dropped
+            if attributor is None
+            else self.delivered,
             unparsed=feeder.unparsed,
             truncated=feeder.truncated,
             gaps=feeder.gaps,
             lost=feeder.lost,
             reconnects=feeder.reconnects,
-            unattributed=0,
+            unattributed=0 if attributor is None else attributor.unattributed,
             flush=self.marks.state,
             error=self.error,
         )
@@ -410,38 +445,50 @@ def _routed(unit: _Unit, chunks: list[Chunk]) -> Iterator[tuple[list[Segment], i
             yield segments, chunk.charge
 
 
-def _queue_read(core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk]) -> None:
+def _queue_read(
+    core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk], received: float
+) -> None:
     """Queue what one read yielded; a device with a stall limit by `_enqueue_limited`.
+
+    ``received`` is when the read's bytes arrived (``perf_counter``).
 
     Raises:
         LogprobeError: The start marker did not come back in time.
     """
     if unit.stall_after is None:
-        _enqueue(core, unit, chunks)
+        _enqueue(core, unit, chunks, received)
     else:
-        _enqueue_limited(core, unit, run, chunks)
+        _enqueue_limited(core, unit, run, chunks, received)
 
 
-def _enqueue(core: _Core, unit: _Unit, chunks: list[Chunk]) -> None:
+def _enqueue(core: _Core, unit: _Unit, chunks: list[Chunk], received: float) -> None:
     """Queue the chunks' segments that the device's markers let through.
 
     A put that has to wait for room is interrupted by a flush request. The
     reader then writes its marker (the chunk it holds was read before it, so it
     belongs before the marker) and puts the same chunk again, now waiting as
-    long as it takes.
+    long as it takes. ``received`` is when the read's bytes arrived
+    (``perf_counter``): a wait for a package list counts from then.
 
     Raises:
         LogprobeError: The start marker did not come back in time.
     """
     outbox = core.outbox
+    attributor = unit.attributor
     for segments, charge in _routed(unit, chunks):
+        if attributor is not None:
+            segments = _judged(core, unit, segments, received)
+            if not segments:
+                continue
         waited = outbox.put(segments, charge, unit.serial, interruptible=True)
         if waited is None:
             _marking(core, unit)
             outbox.put(segments, charge, unit.serial)
 
 
-def _enqueue_limited(core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk]) -> None:
+def _enqueue_limited(
+    core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk], received: float
+) -> None:
     """`_enqueue` for a device whose logd may skip the lines of a slow reader.
 
     The puts of one read may wait ``unit.stall_after`` seconds for room in all
@@ -457,7 +504,12 @@ def _enqueue_limited(core: _Core, unit: _Unit, run: _Run, chunks: list[Chunk]) -
     outbox = core.outbox
     serial = unit.serial
     left = unit.stall_after
+    attributor = unit.attributor
     for segments, charge in _routed(unit, chunks):
+        if attributor is not None:
+            segments = _judged(core, unit, segments, received)
+            if not segments:
+                continue
         began = perf_counter()
         waited = outbox.put(segments, charge, serial, interruptible=True, limit=left)
         if waited is None:
@@ -485,19 +537,609 @@ def _feed_output(
     return unit.feeder.feed(stdout)
 
 
+# -- the package list --------------------------------------------------------------
+#
+# With a condition on the app, every read is judged by the device's
+# `PackageAttributor` before it is queued. A read with a line whose app the
+# latest package list cannot tell waits for a new list first: the reader takes
+# it (after the pacing between two lists) and does not receive meanwhile, for
+# at most `_attribution.LIST_WAIT` seconds from when the read's bytes arrived.
+# The list is also taken again every `_attribution.RECHECK_INTERVAL` seconds
+# (the regular list, within `_marks.COMMAND_LIMIT` seconds) beside the
+# reader, which goes on reading: the reads meanwhile are judged with the list
+# before it. Unless a read waits for it, the reader hands the new list to the
+# attributor only at a network-read boundary: before the first network read
+# after it ended, or as the reader ends (not after a kill). A read that needs
+# a list while the regular list runs waits for that one instead of starting
+# another (also while the device is blind, when no new list may start) and
+# hands it over when it ends; a list that becomes usable after the read's
+# deadline is left for the next network read.
+# A read is judged chunk by chunk, and a chunk that waits for a list (that
+# one, or its own) is judged with a newer list than the chunks before it. One
+# receive is one chunk unless it holds more than `_feed.CHUNK_ENTRIES` lines;
+# the asyncio reader judges a network read batch by batch, so there the map
+# may change between the batches of one network read. The two readers may
+# then deliver different lines, but each counts in ``unattributed`` every line
+# it judged with a list that the newer one shows was outdated. (A line of a
+# watched app that no list ever named is counted by rule 7 of
+# `PackageAttributor` when its verdict depends on its app; it is left out
+# uncounted only when it looks older than the boundary.)
+
+# Why the lines of a read were judged without a list, for the first message.
+_STOPPED_LISTING = "the stream stopped while it waited for the package list"
+_LIST_TOO_LATE = "the package list did not come within the time a read may wait"
+_DEADLINE_LISTING = (
+    "a deadline of the flush or of the start marker passed while it waited for "
+    "the package list"
+)
+# Why a list command for a read failed when it was cut by a time limit.
+_LIST_CUT = "was cut at a time limit of the stream"
+
+
+def _scheduled_late() -> str:
+    """Why the regular list failed when its command took its whole time."""
+    return f"did not finish within {_marks.COMMAND_LIMIT:g} seconds"
+
+
+def _tell(unit: _Unit) -> None:
+    """Log the messages of the device's attributor."""
+    attributor = unit.attributor
+    if attributor is not None:
+        for level, text in attributor.take_messages():
+            _LOG.log(level, text)
+
+
+def _judge_read(
+    unit: _Unit, segments: list[_attribution.Segment], cause: str | None
+) -> list[Segment]:
+    """Judge one read's segments with the device's attributor; count the entries."""
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    out = attributor.judge(segments, cause)
+    _tell(unit)
+    unit.delivered += sum(len(segment) for segment in out if type(segment) is list)
+    return cast("list[Segment]", out)
+
+
+def _list_cause(job: ListJob) -> str | None:
+    """None when the list succeeded, else why the waiting lines had no list."""
+    outcome = job.outcome
+    if isinstance(outcome, Listed):
+        return None
+    reason = "did not finish" if outcome is None else outcome.reason
+    return f"the package list {reason}"
+
+
+def _list_wait_step(
+    core: _CoreBase[Any], unit: _Unit, deadline: float
+) -> str | float | None:
+    """What a read that needs a list does next, until ``deadline`` (``perf_counter``).
+
+    None: start the list now. A number: sleep that many seconds (at most
+    ``TICK``) and ask again. A text: give up and judge the read without a list,
+    for that reason (the stream stops, the read has too little time left for
+    a list, or a deadline of the device passes during the pacing).
+    """
+    if core.outbox.stopping:
+        return _STOPPED_LISTING
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    now = perf_counter()
+    wait = max(attributor.ready_at() - now, 0.0)
+    # A list gets at least `LIST_MIN_TIME` of the read's time, or is not
+    # started at all: no command is spent on a list that would be cut before
+    # the device could answer.
+    if deadline - (now + wait) < _attribution.LIST_MIN_TIME:
+        return _LIST_TOO_LATE
+    left = _list_time_left(core, unit)
+    if left is not None and wait >= left:
+        return _DEADLINE_LISTING
+    return None if wait == 0 else min(TICK, wait)
+
+
+def _list_time_left(core: _CoreBase[Any], unit: _Unit) -> float | None:
+    """The seconds until the device's nearest deadline, for a list while reading.
+
+    As `_time_left`, except after the flush marker came back (``done``): the
+    lines read before the marker may still use what is left of the budget for
+    their list.
+    """
+    marks = unit.marks
+    request = marks.request
+    if marks.state == "done" and request is not None:
+        waited = core.outbox.backpressure().get(unit.serial, 0.0)
+        return request.left(unit.serial, perf_counter(), waited)
+    return _time_left(core, unit)
+
+
+def _list_limit(core: _CoreBase[Any], unit: _Unit, deadline: float) -> float:
+    """The limit of the next list command while reading; zero or less: none left."""
+    limit = deadline - perf_counter()
+    left = _list_time_left(core, unit)
+    return limit if left is None else min(limit, left)
+
+
+def _list_cancelled(
+    core: _CoreBase[Any], unit: _Unit, deadline: float
+) -> Callable[[], bool]:
+    """The cancel check of a list command while reading.
+
+    True when the stream stops, a deadline of the device passes (the flush
+    budget, the start marker's time) or ``deadline`` (``perf_counter``) passes.
+    """
+
+    def cancelled() -> bool:
+        if core.cancelled() or perf_counter() >= deadline:
+            return True
+        left = _list_time_left(core, unit)
+        return left is not None and left <= 0
+
+    return cancelled
+
+
+def _list_too_late(core: _CoreBase[Any], unit: _Unit, deadline: float) -> bool:
+    """Whether a list for a read is past ``deadline`` or a deadline of the device.
+
+    Checked again when a successful list becomes usable: an answer that came
+    after one of them is not used for the read.
+    """
+    return _list_limit(core, unit, deadline) <= 0
+
+
+def _flush_overran(core: _CoreBase[Any], unit: _Unit, cause: str | None) -> None:
+    """End the flush as ``timed_out`` when its lines got no list within the budget.
+
+    Called after the lines of a read that came before the flush marker waited
+    for a list (``cause``: why they got none, None when they got one). The
+    flush is ``done`` once its marker is routed; when the budget ran out before
+    those lines got their list, the flush did not finish in time after all. A
+    read that gave up early (a pacing wait longer than the budget left) leaves
+    the flush ``done``: its lines are delivered at once.
+    """
+    marks = unit.marks
+    if cause is None or marks.state != "done":
+        return
+    left = _list_time_left(core, unit)
+    if left is not None and left <= 0:
+        marks.overran()
+
+
+def _set_boundary(unit: _Unit, result: ShellResult | None) -> None:
+    """Set the attributor's boundary from the result of ``date +%s`` (None: timed out).
+
+    A clock that cannot be read leaves the boundary unset; an INFO says so.
+    """
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    clock: int | None = None
+    if result is None:
+        reason = f"it did not finish within {_marks.COMMAND_LIMIT:g} seconds"
+    elif result.exit_status is None:
+        reason = "it ended without an exit status"
+    elif result.exit_status != 0:
+        reason = f"exit status {result.exit_status}"
+    else:
+        clock = _marks.parse_clock(result.stdout)
+        shown = result.stdout[:80].decode("utf-8", "replace").strip()
+        reason = f"it printed {shown!r}"
+    if clock is None:
+        _LOG.info(
+            "could not read the clock of %s (%s); app lines of removed packages "
+            "in the backlog are checked against a new list",
+            unit.serial,
+            reason,
+        )
+        return
+    attributor.boundary = float(clock)
+
+
+def _take_list(
+    core: _Core,
+    unit: _Unit,
+    deadline: float,
+    cancelled: Callable[[], bool],
+    *,
+    late: str = _LIST_CUT,
+    starting: bool = False,
+) -> str | None:
+    """Take the device's package list, its commands all before ``deadline``.
+
+    ``deadline`` is a ``perf_counter`` time. Returns None when the list
+    succeeded, else why the lines that wait for it get no list. A list whose
+    commands run out of time (or, while reading, are cut by a deadline of the
+    flush or of the start marker) fails: ``late`` says why. While reading, a
+    list that succeeds only after one of those deadlines fails the same way.
+    A stop while reading returns at once, leaving the list without an
+    outcome; the reader then ends.
+
+    Raises:
+        Cancelled: At the start (``starting``): the stream was stopped.
+        LogprobeError: At the start: the device or the adb server failed.
+    """
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    job = attributor.list_started(perf_counter())
+    job.started = perf_counter()
+    while not job.finished:
+        limit = (
+            deadline - perf_counter() if starting else _list_limit(core, unit, deadline)
+        )
+        if limit <= 0:
+            job.fail(late)
+            break
+        try:
+            result = unit.device._run_command(job.argv, limit, cancelled)
+        except _adb.Cancelled:
+            if starting:
+                raise
+            if core.outbox.stopping:
+                return _STOPPED_LISTING
+            job.fail(late)
+        except TimeoutError:
+            job.fail(late)
+        except (LogprobeError, OSError) as error:
+            if starting:
+                raise
+            job.fail(f"failed ({error})")
+        else:
+            job.take(result.exit_status, result.stdout, result.stderr)
+            late_answer = isinstance(job.outcome, Listed) and not starting
+            if late_answer and _list_too_late(core, unit, deadline):
+                job.fail(late, result.stderr)
+    return _end_list(unit, job)
+
+
+def _start_list_late() -> str:
+    """Why a list at the start failed when its commands ran out of time."""
+    return (
+        f"did not finish within the {_marks.COMMAND_LIMIT:g} seconds the start "
+        "gives the list"
+    )
+
+
+def _end_list(unit: _Unit, job: ListJob) -> str | None:
+    """Hand a finished list job to the attributor; see `_take_list` for the result."""
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    attributor.list_done(job, perf_counter())
+    _tell(unit)
+    return _list_cause(job)
+
+
+def _list_for_read(
+    core: _Core, unit: _Unit, segments: list[_attribution.Segment], deadline: float
+) -> str | None:
+    """Get a list for a read whose ``segments`` need one; see `_take_list`.
+
+    ``deadline`` is the read's own (``perf_counter``): every wait and command
+    ends by then. A regular list that runs is waited for first; when it
+    explains the lines, the read takes no list of its own. Otherwise (it
+    started before the read arrived, so it may not name a new app) the read
+    waits for the pacing and takes one, unless the device is blind.
+    """
+    if unit.listing is not None:
+        cause = _wait_listing(core, unit, deadline)
+        attributor = unit.attributor
+        assert attributor is not None  # noqa: S101
+        if cause is not None or not attributor.needs_list(segments):
+            return cause
+    while True:
+        step = _list_wait_step(core, unit, deadline)
+        if step is None:
+            break
+        if isinstance(step, str):
+            return step
+        time.sleep(step)
+    end = min(deadline, perf_counter() + _marks.COMMAND_LIMIT)
+    return _take_list(core, unit, end, _list_cancelled(core, unit, end))
+
+
+def _list_is_due(core: _CoreBase[Any], unit: _Unit) -> bool:
+    """Whether the regular list is due and the pacing lets it start now."""
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    now = perf_counter()
+    return (
+        not core.outbox.stopping
+        and attributor.list_due(now)
+        and now >= attributor.ready_at()
+    )
+
+
+def _take_listing(core: _CoreBase[Any], unit: _Unit, job: ListJob) -> None:
+    """Hand the job of a regular list that ended to the attributor.
+
+    After a kill nothing is judged or counted any more, so the outcome is not
+    used. After a stop only a list that succeeded is: the reader is ending,
+    but the lines it judged with the list before may still be counted, and a
+    failed list would only make the device blind.
+    """
+    outbox = core.outbox
+    if outbox.killed or (outbox.stopping and not isinstance(job.outcome, Listed)):
+        return
+    _end_list(unit, job)
+
+
+def _listing_wait_step(
+    core: _CoreBase[Any], unit: _Unit, deadline: float
+) -> str | float:
+    """How long a read that waits for the regular list waits next, or why it stops.
+
+    A number: wait that many seconds (at most ``TICK``) and look again. A text:
+    give up and judge the read without a list, for that reason (the stream
+    stops, a deadline of the device passed, or ``deadline``, the read's own
+    ``perf_counter`` time, passed).
+    """
+    if core.outbox.stopping:
+        return _STOPPED_LISTING
+    left = _list_time_left(core, unit)
+    if left is not None and left <= 0:
+        return _DEADLINE_LISTING
+    now = perf_counter()
+    if now >= deadline:
+        return _LIST_TOO_LATE
+    step = min(TICK, deadline - now)
+    return step if left is None else min(step, left)
+
+
+class _Listing:
+    """The regular package list of a device while it runs beside the reader.
+
+    The helper thread (``logprobe-list-<serial>``) runs the commands of
+    ``job`` by ``deadline`` (``perf_counter``) and fills the job in; it
+    exists only while the list runs. The reader alone hands the job to the
+    attributor once the thread ended, also when the reader ends (unless the
+    stream was killed; `_settle_listing`). For a list that still runs then,
+    the reader sets ``abandoned`` and does not wait: the thread gives up
+    within ``_adb.TICK`` seconds, and `LogStream.join` waits for it.
+
+    ``errors`` holds an unexpected failure of the thread (a bug), at most
+    one. The reader raises it; once the list is abandoned it is logged
+    instead. The thread appends and then looks at ``abandoned``, the reader
+    sets ``abandoned`` and then looks at ``errors``, and whoever pops the
+    failure reports it (`_report_left`), so it is reported exactly once.
+    """
+
+    __slots__ = ("abandoned", "deadline", "errors", "job", "thread")
+
+    def __init__(
+        self,
+        job: ListJob,
+        deadline: float,
+        run: Callable[[_Listing], None],
+        name: str,
+    ) -> None:
+        self.job = job
+        self.deadline = deadline
+        self.abandoned = False
+        self.errors: list[Exception] = []
+        self.thread = threading.Thread(target=run, args=(self,), name=name, daemon=True)
+
+
+def _run_listing(core: _Core, unit: _Unit, listing: _Listing) -> None:
+    """The helper thread of the regular list: run the commands of its job."""
+    try:
+        _run_list_commands(core, unit, listing)
+    except Exception as error:  # noqa: BLE001  (the reader raises it: a bug ends the stream)
+        listing.errors.append(error)
+        if listing.abandoned:
+            _report_left(unit, listing)
+
+
+def _report_left(unit: _Unit, listing: _Listing) -> None:
+    """Log the unexpected failure of an abandoned list's thread, if it has one."""
+    try:
+        error = listing.errors.pop()
+    except IndexError:
+        return
+    _LOG.error(
+        "%s: the regular package list failed after the reader had ended",
+        unit.serial,
+        exc_info=error,
+    )
+
+
+def _run_list_commands(core: _Core, unit: _Unit, listing: _Listing) -> None:
+    """Run the commands of the regular list's job until it has an outcome.
+
+    A command cut by the stop flag, by ``abandoned`` or by the deadline fails
+    the list as late. Once abandoned, or after a kill, the outcome is not used.
+    After a stop a list that succeeded (its last command ended before the stop
+    could cut it) is still handed over as the reader ends (`_settle_listing`),
+    and a failed one, a command cut short by the stop included, is discarded.
+    The pacing to the next list counts from when the first command starts.
+    """
+    job = listing.job
+    deadline = listing.deadline
+
+    def cancelled() -> bool:
+        return core.cancelled() or listing.abandoned or perf_counter() >= deadline
+
+    job.started = perf_counter()
+    while not job.finished:
+        limit = deadline - perf_counter()
+        if limit <= 0:
+            job.fail(_scheduled_late())
+            break
+        try:
+            result = unit.device._run_command(job.argv, limit, cancelled)
+        except (_adb.Cancelled, TimeoutError):
+            job.fail(_scheduled_late())
+        except (LogprobeError, OSError) as error:
+            job.fail(f"failed ({error})")
+        else:
+            job.take(result.exit_status, result.stdout, result.stderr)
+
+
+def _start_listing(core: _Core, unit: _Unit) -> None:
+    """Start the regular list on its helper thread; the reader goes on.
+
+    A thread that cannot be started (the system has no resources left for
+    one) makes a failed list; nothing is left in ``unit.listing`` then.
+    """
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    now = perf_counter()
+    listing = _Listing(
+        attributor.list_started(now),
+        now + _marks.COMMAND_LIMIT,
+        partial(_run_listing, core, unit),
+        f"logprobe-list-{unit.serial}",
+    )
+    try:
+        listing.thread.start()
+    except RuntimeError as error:
+        listing.job.fail(f"failed (could not start its thread: {error})")
+        _take_listing(core, unit, listing.job)
+        return
+    unit.listing = listing
+
+
+def _collect_listing(core: _Core, unit: _Unit) -> bool:
+    """Hand a regular list whose thread ended to the attributor (`_take_listing`).
+
+    Returns False while the list runs, True when none runs (any more).
+
+    Raises:
+        Exception: The helper thread failed unexpectedly (a bug).
+    """
+    listing = unit.listing
+    if listing is None:
+        return True
+    if listing.thread.is_alive():
+        return False
+    listing.thread.join()
+    unit.listing = None
+    if listing.errors:
+        raise listing.errors.pop()
+    _take_listing(core, unit, listing.job)
+    return True
+
+
+def _wait_listing(core: _Core, unit: _Unit, deadline: float) -> str | None:
+    """Wait for the regular list that runs, for a read, until ``deadline``.
+
+    Returns None once the list was handed to the attributor, else why the
+    read gives up (see `_listing_wait_step`); the list then goes on. The
+    deadlines are looked at before a list that ended is handed over, so a
+    list that becomes usable after them is left for the next network read.
+    """
+    while True:
+        step = _listing_wait_step(core, unit, deadline)
+        if isinstance(step, str):
+            return step
+        if _collect_listing(core, unit):
+            return None
+        listing = unit.listing
+        assert listing is not None  # noqa: S101
+        listing.thread.join(step)
+
+
+def _tend_listing(core: _Core, unit: _Unit) -> None:
+    """Hand over a regular list that ended, and start the next one when it is due."""
+    if _collect_listing(core, unit) and _list_is_due(core, unit):
+        _start_listing(core, unit)
+
+
+def _settle_listing(
+    core: _Core, unit: _Unit, error: LogprobeError | None
+) -> LogprobeError | None:
+    """The reader ends: hand over a regular list whose thread ended already.
+
+    A list that ended between the reader's last look and its end (a flush
+    marker came, the connection ended) may count lines the reader judged with
+    the list before it; it is handed over as by `_take_listing` (not after a
+    kill, and after a stop only when it succeeded). A list that still runs is
+    not waited for, and a thread that failed is left to `_drop_listing`.
+
+    Returns the reader's error: ``error``, or when that is None and the
+    handover failed unexpectedly (a bug), that failure (`_settle_failed`).
+    """
+    listing = unit.listing
+    if listing is None or listing.thread.is_alive() or listing.errors:
+        return error
+    listing.thread.join()
+    unit.listing = None
+    try:
+        _take_listing(core, unit, listing.job)
+    except Exception as failure:  # noqa: BLE001  (a bug; the reader still ends)
+        return _settle_failed(unit, error, failure)
+    return error
+
+
+def _settle_failed(
+    unit: _Unit, error: LogprobeError | None, failure: Exception
+) -> LogprobeError:
+    """The error of a reader whose list handover at its end failed with ``failure``.
+
+    The reader's own error comes first; ``failure`` is then only logged. A log
+    handler that fails here (``failure`` may be its failure on the list's own
+    message) must not keep the reader's error from the consumer.
+    """
+    if error is None:
+        return _failure_of(unit, failure)
+    with contextlib.suppress(Exception):  # the reader must still end
+        _LOG.error(
+            "%s: handing over the regular package list failed as the reader ended",
+            unit.serial,
+            exc_info=failure,
+        )
+    return error
+
+
+def _drop_listing(unit: _Unit) -> None:
+    """The reader ends: tell the regular list's thread to give up.
+
+    Its outcome is never used, and the reader does not wait for the thread:
+    the list moves to ``unit.left_listing``, for `LogStream.join`. An
+    unexpected failure of the thread is logged (`_Listing`).
+    """
+    listing = unit.listing
+    if listing is not None:
+        listing.abandoned = True
+        unit.listing = None
+        unit.left_listing = listing
+        _report_left(unit, listing)
+
+
+def _judged(
+    core: _Core, unit: _Unit, segments: list[Segment], received: float
+) -> list[Segment]:
+    """One routed chunk of a read, judged by the device's attributor.
+
+    When a line needs a newer list, the list is taken first (the read's bytes
+    arrived at ``received``, a ``perf_counter`` time, and it waits at most
+    `_attribution.LIST_WAIT` seconds from then). After a kill nothing is
+    judged or counted, in this chunk or in the later ones of the read.
+    """
+    if core.outbox.killed:
+        return []
+    attributor = unit.attributor
+    assert attributor is not None  # noqa: S101
+    judged = cast("list[_attribution.Segment]", segments)
+    cause: str | None = None
+    if attributor.needs_list(judged, running=unit.listing is not None):
+        cause = _list_for_read(core, unit, judged, received + _attribution.LIST_WAIT)
+        if core.outbox.killed:
+            return []
+        _flush_overran(core, unit, cause)
+    return _judge_read(unit, judged, cause)
+
+
 def _decode(
-    core: _Core, run: _Run, unit: _Unit, data: bytes
+    core: _Core, run: _Run, unit: _Unit, data: bytes, received: float
 ) -> tuple[int | None, LogprobeError | None]:
     """Decode ``data``, keep its stderr, and queue what its stdout yields.
 
-    Returns the exit status (None unless ``data`` completed the exit packet) and
-    the protocol error that ended decoding (or None). The stdout before an error
-    is queued first.
+    ``received`` is when ``data`` arrived (``perf_counter``). Returns the exit
+    status (None unless ``data`` completed the exit packet) and the protocol
+    error that ended decoding (or None). The stdout before an error is queued
+    first.
     """
     pieces, status, broken = run.decoder.feed_pieces(data)
     err = b"".join(p for kind, p, _ in pieces if kind == "stderr")
     out = b"".join(p for kind, p, _ in pieces if kind == "stdout")
-    _queue_read(core, unit, run, _feed_output(unit, run, err, out))
+    _queue_read(core, unit, run, _feed_output(unit, run, err, out), received)
     return status, broken
 
 
@@ -517,23 +1159,19 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
             queued), or the start marker did not come back in time.
     """
     outbox = core.outbox
-    marks = unit.marks
     sock = run.conn.sock
     wait = TICK
     sock.settimeout(wait)
     while True:
-        limit = TICK
-        if core.flush is not None or marks.phase is Phase.SKIPPING:
-            limit = _marking(core, unit)
-            if limit is None:
-                return
-        if outbox.stopping:  # a stop that came after the last look
+        limit = _before_read(core, unit)
+        if limit is None or outbox.stopping:  # also a stop after the last look
             return
         if limit != wait:
             wait = limit
             sock.settimeout(wait)
         began = monotonic()
         data = _receive(sock)
+        received = perf_counter()
         if data is None:  # nothing arrived within the wait
             if _quiet(core, unit, run, monotonic() - began):
                 return
@@ -543,7 +1181,7 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
         check = run.pending()
         if check is not None:
             check.received()
-        status, broken = _decode(core, run, unit, data)
+        status, broken = _decode(core, run, unit, data, received)
         if status is not None:  # whatever follows the exit packet is ignored
             run.exit_status = status
             return
@@ -551,6 +1189,36 @@ def _read(core: _Core, unit: _Unit, run: _Run) -> None:
             raise broken
         if outbox.stopping or run.stalled:
             return
+
+
+def _before_read(core: _Core, unit: _Unit) -> float | None:
+    """Do what the markers ask, and look after the regular package list.
+
+    A regular list that ended is handed to the attributor, so the reads from
+    now on are judged with it, and a list that is due starts beside the
+    reader (`_start_listing`). Returns the longest the next receive may
+    wait, or None when this connection is not to be read any more (see
+    `_marking`).
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+        Exception: The helper thread of the regular list failed (a bug).
+    """
+    limit = _marks_limit(core, unit)
+    if limit is not None and unit.attributor is not None:
+        _tend_listing(core, unit)
+    return limit
+
+
+def _marks_limit(core: _Core, unit: _Unit) -> float | None:
+    """`_marking` when a marker is pending, else ``TICK``.
+
+    Raises:
+        LogprobeError: The start marker did not come back in time.
+    """
+    if core.flush is not None or unit.marks.phase is Phase.SKIPPING:
+        return _marking(core, unit)
+    return TICK
 
 
 def _idle_ended(run: _RunBase, waited: float) -> bool:
@@ -569,7 +1237,7 @@ def _quiet(core: _Core, unit: _Unit, run: _Run, waited: float) -> bool:
     if outbox.stopping:
         return True
     if _idle_ended(run, waited):
-        _queue_read(core, unit, run, unit.feeder.end_check())
+        _queue_read(core, unit, run, unit.feeder.end_check(), perf_counter())
         return outbox.stopping or run.stalled
     return False
 
@@ -662,34 +1330,6 @@ def _write_marker(core: _Core, unit: _Unit, step: Step) -> None:
     unit.marks.command_done(result.exit_status)
 
 
-def _command_failed(
-    serial: str,
-    argv: list[str],
-    exit_status: int | None,
-    stderr: bytes = b"",
-    *,
-    outcome: str | None = None,
-) -> LogprobeError:
-    """The error for a device command the start of the stream needs.
-
-    ``outcome`` says what went wrong when the exit status does not (a timeout,
-    output that could not be read).
-    """
-    if outcome is None:
-        outcome = f"did not succeed (exit status {exit_status})"
-    tail = stderr.decode("utf-8", "replace").splitlines()[-_STDERR_LINES:]
-    return LogprobeError(
-        "device_command_failed",
-        f"the command {' '.join(argv)!r} on {serial} {outcome}",
-        {
-            "serial": serial,
-            "command": argv,
-            "exit_status": exit_status,
-            "stderr": tail,
-        },
-    )
-
-
 def _command_timed_out(unit: _Unit, argv: list[str]) -> LogprobeError:
     """The error for a command the start needs that took longer than the limit."""
     outcome = f"did not finish within {_marks.COMMAND_LIMIT:g} seconds"
@@ -743,7 +1383,7 @@ def _begin_start_marker(unit: _Unit, clock: int) -> list[str]:
 
 def _prepare_since(core: _Core, unit: _Unit) -> None:
     """Read the device clock and write the start marker, for ``since="now"``."""
-    argv = ["date", "+%s"]
+    argv = list(_BOUNDARY_COMMAND)
     result = _one_shot(core, unit, argv)
     clock = _device_clock(unit, argv, result)
     _one_shot(core, unit, _begin_start_marker(unit, clock))
@@ -803,11 +1443,42 @@ def _check_logd(core: _Core, unit: _Unit) -> None:
     _judge_logd(unit, result)
 
 
+def _read_boundary(core: _Core, unit: _Unit) -> None:
+    """Read the device clock that tells the backlog from new lines (``since`` None).
+
+    A command that fails or takes too long leaves the boundary unset; an error
+    of the adb server or the device fails the start.
+
+    Raises:
+        LogprobeError: The device or the adb server failed.
+    """
+    try:
+        result = unit.device._run_command(
+            _BOUNDARY_COMMAND, _marks.COMMAND_LIMIT, core.cancelled
+        )
+    except TimeoutError:
+        result = None
+    _set_boundary(unit, result)
+
+
 def _prepare(core: _Core, unit: _Unit, *, since: bool, detect_skips: bool) -> None:
-    """Step one of the start for one device: the checks and the start marker."""
+    """Step one of the start for one device: the checks, the package list and
+    the start marker.
+
+    With a condition on the app, the device clock (``since`` None) and the
+    package list come after the API level and before the start marker. A list
+    that fails or takes longer than its limit leaves the device without one
+    for a while (a WARNING says so); an adb error fails the start.
+    """
     unit.device._require_shell_v2(core.cancelled)
     if detect_skips:
         _check_logd(core, unit)
+    if unit.attributor is not None:
+        if not since:
+            _read_boundary(core, unit)
+        deadline = perf_counter() + _marks.COMMAND_LIMIT
+        late = _start_list_late()
+        _take_list(core, unit, deadline, core.cancelled, late=late, starting=True)
     if since:
         _prepare_since(core, unit)
 
@@ -1171,6 +1842,9 @@ def _reader(core: _Core, unit: _Unit) -> None:
     finally:
         if unit.conn is not None:
             unit.conn.close()
+        if unit.attributor is not None:
+            error = _settle_listing(core, unit, error)
+        _drop_listing(unit)  # not waited for: `LogStream.join` does that
         _finish(core, unit, error)
         core.outbox.put([_DeviceEnded(unit.serial)], 0, unit.serial)
 
@@ -1352,7 +2026,9 @@ class LogStream:
 
         Runs on the calling thread in three steps: each device is prepared in
         turn (``shell_v2`` check, with ``detect_skips`` the device's API level,
-        and with ``since="now"`` the device clock and the start marker), then
+        with a condition on the app the device clock (``since`` None) and the
+        package list, and with ``since="now"`` the device clock and the start
+        marker), then
         all logcat connections are opened back to back, then all readers start
         (all or none). The readers wait for the start marker, not ``start()``.
         When ``stop()`` or ``kill()`` is called, before or during the start,
@@ -1568,7 +2244,10 @@ class LogStream:
 
         With ``on_entry``, this also waits until the queued entries were given
         to the callback. Without it, readers can end only when the queue is
-        consumed or the stream is stopped.
+        consumed or the stream is stopped. It also waits for the helper
+        thread of a package list that a reader left running when it ended
+        (at most 0.25 seconds after that reader's end), so no thread of the
+        stream is left when it returns.
 
         Raises:
             TimeoutError: ``timeout`` seconds passed; the stream keeps running.
@@ -1576,7 +2255,8 @@ class LogStream:
             LogprobeError: The error that ended the stream (the same object
                 every time). An exception raised by ``on_entry`` is raised
                 as it is.
-            KeyboardInterrupt: Raised while waiting; the stream is killed.
+            KeyboardInterrupt: Raised while waiting; the stream is killed, and
+                its readers and package list threads are waited for first.
         """
         if self._phase is _Phase.NEW or self._phase is _Phase.STARTING:
             msg = "the stream is not started"
@@ -1587,6 +2267,7 @@ class LogStream:
             raise RuntimeError(msg)
         deadline = None if timeout is None else monotonic() + timeout
         self._wait(self._threads(), deadline)
+        self._wait(self._left_threads(), deadline)
         error = core.error
         if error is not None:
             raise error
@@ -1599,8 +2280,25 @@ class LogStream:
             threads.append(core.consumer)
         return threads
 
+    def _left_threads(self) -> list[threading.Thread]:
+        """The threads of the regular lists the ended readers left running.
+
+        Each gives up within ``_adb.TICK`` seconds of its reader's end.
+        """
+        return [
+            unit.left_listing.thread
+            for unit in self._core.units
+            if unit.left_listing is not None
+        ]
+
     def _wait(self, threads: list[threading.Thread], deadline: float | None) -> None:
-        """Wait for ``threads`` in slices of ``TICK``; kill on Ctrl-C."""
+        """Wait for ``threads`` in slices of ``TICK``.
+
+        On Ctrl-C the stream is killed, and the readers and the helper
+        threads of the package lists (which end within ``TICK`` of the kill)
+        are waited for before the interrupt goes on; the consumer is not, as
+        its callback may never return.
+        """
         try:
             for thread in threads:
                 while thread.is_alive():
@@ -1614,7 +2312,14 @@ class LogStream:
                     thread.join(step)
         except KeyboardInterrupt:
             self.kill()
+            self._reap_after_kill()
             raise
+
+    def _reap_after_kill(self) -> None:
+        """Wait for the readers, then for the list threads they left (killed)."""
+        readers = [u.thread for u in self._core.units if u.thread is not None]
+        _join_all(readers)
+        _join_all(self._left_threads())  # a reader leaves its list when it ends
 
     def __exit__(
         self,
@@ -1628,6 +2333,7 @@ class LogStream:
             self.kill()
             readers = [u.thread for u in core.units if u.thread is not None]
             self._wait(readers, None)
+            self._wait(self._left_threads(), None)
             if core.error is not None and core.error is not exc:
                 _LOG.error("the stream ended with an error", exc_info=core.error)
             return
@@ -1661,6 +2367,13 @@ class LogStream:
         device is the time the stream was created.
         """
         return StreamSummary(tuple(unit.summary() for unit in self._core.units))
+
+
+def _join_all(threads: list[threading.Thread]) -> None:
+    """Wait for ``threads`` in slices of ``TICK`` (so a Ctrl-C can interrupt)."""
+    for thread in threads:
+        while thread.is_alive():
+            thread.join(TICK)
 
 
 def _check_limit(name: str, value: object, minimum: int) -> None:
@@ -1731,7 +2444,6 @@ def _devices(devices: Iterable[Device | str]) -> list[Device]:
 
 def _check_arguments(
     where: Condition | None,
-    caller: str,
     *,
     level: LogLevel | None,
     tag: str | list[str] | tuple[str, ...] | None,
@@ -1748,7 +2460,7 @@ def _check_arguments(
     """Check the arguments `stream` and `astream` have in common.
 
     Returns the condition (None when there is none) and the reconnect budget in
-    seconds. ``caller`` is the function's name, for the messages.
+    seconds.
     """
     _check_since(since)
     budget = _check_reconnect(reconnect)
@@ -1763,9 +2475,6 @@ def _check_arguments(
     condition = build_condition(
         where, level=level, tag=tag, message=message, package=package, pid=pid
     )
-    if condition is not None and condition._has_package():
-        msg = f"conditions on the app (Package) are not supported by {caller}() yet"
-        raise NotImplementedError(msg)
     return condition, budget
 
 
@@ -1842,6 +2551,72 @@ def stream(
     replays from before the resume point and the history no longer holds those
     lines.
 
+    With a condition on the app (``Package`` or ``package``), the app of a line
+    is found from its uid. ``start()`` reads each device's list of every
+    installed package with its uid (``pm list packages -U``, or ``dumpsys
+    package packages`` on devices that do not know ``-U``; 5 seconds at
+    most), and with ``since`` None the device clock just before it (``date
+    +%s``). A line whose app the list does not name and that was logged after
+    that clock (an app installed while reading) makes the reader take the
+    list again before it delivers that read, at most once in 0.5 seconds.
+    Only then does the reader pause reading the device: normally 0.03-0.14
+    seconds, at most 2 seconds counted from when the read's bytes arrived
+    (time spent waiting for room in the queue counts), and the read starts a
+    list only when at least 1 second of that is left. The list is also taken
+    again every 30 seconds, to notice a reinstall. That list runs in the
+    background (on a short-lived helper thread ``logprobe-list-<serial>``,
+    or as a task on the asyncio stream) for at most 5 seconds, and the
+    reader goes on reading: the lines read meanwhile are judged with the
+    previous list, and the new list applies from the next network read on
+    (when the reader ends first, other than by a kill, it still takes a list
+    that ended by then, and counts what it shows).
+    A read that needs a list while it runs waits for it, within its own 2
+    seconds, rather than starting another (and takes its own afterwards when
+    that list does not name its app); the new list then applies from that
+    read on. The asyncio stream judges a network read in batches of about 8
+    KiB, so the batches of one network read before such a read are judged
+    with the previous list, where the blocking stream judges the whole
+    network read with the new one (it too judges a network read of more than
+    2048 lines in parts). The two may then deliver different lines and count
+    different lines as unattributed, but each counts every line it judged
+    with a list that the new one shows was outdated. Stopping or killing the
+    stream does not wait for it, nor does a flush, the start marker or a reader
+    that ends (``join`` of the blocking stream waits for the helper thread to
+    leave, which takes at most 0.25 seconds once the reader ended). A read
+    whose list did not come in time (an answer that is ready only after the
+    read's time, the flush budget or the start marker's time counts as not in
+    time), or failed, is delivered as if no package owned its undecided lines,
+    and those lines are counted in the device's ``unattributed`` (the summary
+    is then incomplete). A list that fails, or is cut by a time limit, leaves
+    the device without a new list for 30 seconds (a read may still wait for the
+    list that ends that time, but starts none): the last list that succeeded
+    still decides the apps it names, and the lines it cannot decide are counted
+    (before any list succeeded, every line of an app id from 10000 to 19999
+    whose verdict depends on its app is, and the lines of other uids are
+    counted when the first list that succeeds shows a watched app under their
+    uid). After a list shows that a watched app got a new uid or was removed,
+    every line of its old uid (a system uid too, and whatever else the
+    condition asks about it) is counted the same way until a list that started
+    30 seconds or more after that one (normally the next list taken every 30
+    seconds; a list taken for a read in between does not end it) or that shows
+    a watched app under that uid, since they may be late lines of the app. A
+    line whose app the list taken for its read does not name either is
+    delivered as if no package owned it; when its verdict depends on its app
+    and it was logged at or after the device clock read before the first list
+    (any such line with ``since="now"`` or when that clock could not be read),
+    it is counted the same way, since a watched app may have been installed
+    and removed while the reader was behind the device. This also counts the
+    lines of an app that is not watched, installed and removed meanwhile, and
+    those of an app id that no list ever names (perhaps an app installed only
+    for another user, which is not verified) for as long as the stream runs. A
+    WARNING says so, once per device for the first failed list and once for the
+    first such line. ``entries`` in the summary counts the delivered entries.
+    Lines of a watched app's isolated processes (such as a WebView renderer,
+    app ids 90000 to 99999) are not attributed to the app, and how an app
+    installed only for a secondary user is listed is not verified; see
+    `Package` for the rest of what is not promised. An adb error while the list
+    is read fails ``start()``; while reading it counts as a failed list.
+
     Args:
         devices: `Device` objects or serial strings (a string becomes
             ``Device(serial)``), at least one, no serial twice.
@@ -1849,7 +2624,7 @@ def stream(
         level: Shortcut: at least this level.
         tag: Shortcut: one of these tags.
         message: Shortcut: the message contains this text.
-        package: Shortcut: lines of these apps (not implemented yet).
+        package: Shortcut: lines of these apps (see below and `Package`).
         pid: Shortcut: one of these process ids.
         since: ``None`` (the default) starts with the backlog the device still
             holds. ``"now"`` skips it: ``start()`` reads each device's clock,
@@ -1941,7 +2716,6 @@ def stream(
         ValueError: A value is out of range (``reconnect`` is NaN or negative,
             ``since`` is a string other than ``"now"``), ``devices`` is empty or
             repeats a serial, or a shortcut value is invalid.
-        NotImplementedError: The condition tests the app of a line (``Package``).
         LogprobeError: A serial string names no usable device (see `Device`).
 
     When iterating or joining, the error that ended the stream is raised:
@@ -1952,7 +2726,6 @@ def stream(
     """
     condition, budget = _check_arguments(
         where,
-        "stream",
         level=level,
         tag=tag,
         message=message,

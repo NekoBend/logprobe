@@ -1116,6 +1116,18 @@ class ShellV2Decoder:
                         return pieces, status, protocol_error(_AFTER_EXIT)
         return pieces, status, None
 
+    @property
+    def receiving(self) -> str | None:
+        """``"stdout"`` or ``"stderr"`` while the payload of such a packet is
+        only partly received, else None."""
+        if self._remaining == 0:
+            return None
+        if self._kind == _ID_STDOUT:
+            return "stdout"
+        if self._kind == _ID_STDERR:
+            return "stderr"
+        return None
+
     def feed(self, data: bytes) -> tuple[bytes, bytes, int | None]:
         """Decode ``data``; return its stdout bytes, stderr bytes and exit status.
 
@@ -1311,6 +1323,16 @@ class ShellStream:
             self._error = error
             self._finished = True
 
+    def held_stderr(self) -> bytes:
+        """The received part of a stderr packet that is not complete yet.
+
+        `read` returns a packet only once it is complete; this is for an error
+        report when the command did not get that far.
+        """
+        if self._decoder.receiving != "stderr":
+            return b""
+        return bytes(self._partial)
+
     def close(self) -> None:
         """Close the connection. Safe to call more than once."""
         if self._closed:
@@ -1371,13 +1393,26 @@ class ShellResult:
     """Outcome of a one-shot device command.
 
     ``exit_status`` is None when the connection dropped before the device
-    reported one; ``stdout`` and ``stderr`` may then be incomplete (they hold
-    only the packets that arrived whole).
+    reported one; ``stdout`` and ``stderr`` may then be incomplete: ``stdout``
+    holds only the packets that arrived whole, and ``stderr`` may end with the
+    received part of a packet that was cut off.
     """
 
     exit_status: int | None
     stdout: bytes
     stderr: bytes
+
+
+class CommandTimeoutError(TimeoutError):
+    """A one-shot command did not finish within its time limit.
+
+    Attributes:
+        stderr: What the command had written to stderr by then.
+    """
+
+    def __init__(self, message: str, stderr: bytes) -> None:
+        super().__init__(message)
+        self.stderr = stderr
 
 
 def run_shell(
@@ -1394,8 +1429,14 @@ def run_shell(
     no limit on the command; connecting and the handshake then use
     ``DEFAULT_TIMEOUT``.
 
+    When the connection ends without an exit status, the stderr of the result
+    ends with the received part of a stderr packet that was cut off; its
+    stdout holds only the packets that arrived whole.
+
     Raises:
-        TimeoutError: If everything did not finish within ``timeout`` seconds.
+        TimeoutError: If everything did not finish within ``timeout`` seconds
+            (a `CommandTimeoutError`, with the stderr received by then, the
+            received part of an unfinished stderr packet included).
         LogprobeError: As :func:`open_shell`, or ``adb_error`` on a protocol
             violation.
         Cancelled: If ``cancelled`` is given and returned true; the socket is
@@ -1404,16 +1445,22 @@ def run_shell(
     out = bytearray()
     err = bytearray()
     deadline = None if timeout is None else time.monotonic() + timeout
+    opened: ShellStream | None = None
     try:
         with open_shell(
             address, serial, args, deadline=deadline, cancelled=cancelled
         ) as stream:
+            opened = stream
             stream.set_deadline(deadline)
             while (event := stream.read(cancelled)) is not None:
                 (out if event[0] == "stdout" else err).extend(event[1])
     except TimeoutError:
+        if opened is not None:
+            err += opened.held_stderr()
         msg = f"command did not finish within {timeout} seconds"
-        raise TimeoutError(msg) from None
+        raise CommandTimeoutError(msg, bytes(err)) from None
+    if stream.exit_status is None:  # the connection ended inside a packet
+        err += stream.held_stderr()
     return ShellResult(stream.exit_status, bytes(out), bytes(err))
 
 

@@ -549,6 +549,22 @@ def test_a_packet_cut_in_the_middle_delivers_none_of_it(client: Client) -> None:
     assert (events, status) == ([("stdout", b"ok")], None)
 
 
+@pytest.mark.parametrize(
+    ("cut", "stderr"),
+    [(packet(1, b"cut off")[:-3], b"err "), (packet(2, b"cut off")[:-3], b"err cut ")],
+    ids=["stdout-packet", "stderr-packet"],
+)
+def test_a_command_without_an_exit_status_keeps_only_a_cut_stderr_part(
+    client: Client, cut: bytes, stderr: bytes
+) -> None:
+    """As `Device.shell` says: stdout holds whole packets only, and stderr
+    ends with the received part of a stderr packet that was cut off."""
+    reply = b"OKAYOKAY" + packet(1, b"ok") + packet(2, b"err ") + cut
+    with raw_server(reply) as (address, _):
+        result = client.run(address, ["x"], 5.0)
+    assert result == _adb.ShellResult(None, b"ok", stderr)
+
+
 def test_an_empty_exit_packet_comes_after_the_output_and_only_once(
     client: Client,
 ) -> None:

@@ -14,7 +14,8 @@ import gc
 import inspect
 import threading
 import weakref
-from typing import TYPE_CHECKING, Any, Literal
+from time import perf_counter
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pytest
 
@@ -36,6 +37,8 @@ from tests.test_stream_resume import BASE, at, expect_t, released, staying
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Generator
+
+    from logprobe._aadb import AsyncShellStream
 
 pytestmark = pytest.mark.filterwarnings("error::ResourceWarning")
 
@@ -167,8 +170,9 @@ def test_astream_takes_the_arguments_of_stream_without_on_entry(
     assert isinstance(s, AsyncLogStream)
     assert s.serials == ("a",)
     assert server.requests == before
-    with pytest.raises(NotImplementedError, match="astream"):
-        device.astream(package="com.example")
+    with_package = device.astream(package="com.example")
+    assert with_package._core.units[0].attributor is not None
+    assert server.requests == before  # the package list is read by start()
 
 
 # --- iteration ---------------------------------------------------------------
@@ -973,22 +977,18 @@ class _Clock:
 class _ScriptedStream:
     """Stands in for the connection: parts of output, ``None`` for a silent read.
 
-    The read that follows a part is cut at once, as the reader cuts it when it
-    already has data; it takes no time.
+    Each part is one network read, so a batch takes one part at most.
     """
 
     exit_status = None
+    received_at = 0.0
 
     def __init__(self, clock: _Clock, *chunks: bytes | None) -> None:
         self._clock = clock
         self._chunks = list(chunks)
-        self._cut_next = False
         self.reads_after_the_script = 0
 
     async def read_part(self) -> tuple[str, bytes] | None:
-        if self._cut_next:
-            self._cut_next = False
-            raise TimeoutError
         if not self._chunks:
             self.reads_after_the_script += 1
             return None
@@ -996,8 +996,15 @@ class _ScriptedStream:
         if chunk is None:
             self._clock.now += 0.6  # a read of a silent connection ran out of time
             raise TimeoutError
-        self._cut_next = True
         return ("stdout", chunk)
+
+    def needs_read(self) -> bool:
+        """The next part comes with a new network read."""
+        return True
+
+    def decoded(self) -> int:
+        """Each part is one network read: nothing is decoded ahead of it."""
+        return 0
 
     def close(self) -> None:
         pass
@@ -1044,7 +1051,8 @@ def test_a_check_that_ends_on_a_full_queue_does_not_read_again_after_a_stop(
 
     async def scenario() -> None:
         history = [at(10 + k / 10, name) for k, name in enumerate("abcd")]
-        await _astream._enqueue(core, unit, unit.feeder.feed(b"".join(history)))
+        chunks = unit.feeder.feed(b"".join(history))
+        await _astream._enqueue(core, unit, chunks, perf_counter())
         plan = _resume.plan_resume(unit.feeder, "disconnected", BASE)
         unit.feeder.begin_connection(plan.check)
         run_ = _astream._ARun(stream, "a", plan.check)  # ty: ignore[invalid-argument-type]
@@ -1053,5 +1061,35 @@ def test_a_check_that_ends_on_a_full_queue_does_not_read_again_after_a_stop(
         getattr(outbox, request_name)()
         await asyncio.wait_for(task, GUARD)
         assert stream.reads_after_the_script == 0  # it looked at the flags first
+
+    run(scenario)
+
+
+class _TwoReads:
+    """Two network reads: the first left two events decoded, and the bytes of
+    the second are there already (reading them takes no wait)."""
+
+    def __init__(self) -> None:
+        self._decoded: list[tuple[str, bytes]] = [("stdout", b"a"), ("stdout", b"b")]
+        self._next: list[tuple[str, bytes]] = [("stdout", b"c")]
+
+    def needs_read(self) -> bool:
+        return not self._decoded
+
+    async def read_part(self) -> tuple[str, bytes] | None:
+        if not self._decoded:
+            self._decoded, self._next = self._next, []
+        return self._decoded.pop(0) if self._decoded else None
+
+
+def test_a_batch_holds_the_output_of_one_network_read_at_most() -> None:
+    # The events of one read share the time the read arrived; a batch that
+    # took events of the next read as well would give them that time too.
+    stream = cast("AsyncShellStream", _TwoReads())
+
+    async def scenario() -> None:
+        first = await _astream.gather(stream, 1.0)
+        second = await _astream.gather(stream, 1.0)
+        assert (first.out, second.out) == ([b"a", b"b"], [b"c"])
 
     run(scenario)
