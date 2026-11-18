@@ -1533,11 +1533,13 @@ def test_a_stop_before_the_first_read_reads_nothing(
             # the bytes cannot be seen in the socket; there the test only knows
             # that the fake wrote them.
             proactor = getattr(asyncio, "ProactorEventLoop", None)
-            if proactor is not None and isinstance(
+            if len(getattr(stream._reader, "_buffer")):  # noqa: B009
+                pass  # the line has reached the reader already
+            elif proactor is not None and isinstance(
                 asyncio.get_running_loop(), proactor
             ):
                 assert server.wait_reached("blocked")
-            elif not len(getattr(stream._reader, "_buffer")):  # noqa: B009
+            else:
                 arrived(stream._writer.get_extra_info("socket"))
             s.stop()
 

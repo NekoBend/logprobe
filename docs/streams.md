@@ -155,7 +155,7 @@ A stream runs until you end it or it fails. These calls end it:
 
 | Call | Effect |
 | --- | --- |
-| `stop()` | The readers notice at their next check (at least every 0.25 seconds while they wait for data), queue every complete line of the network reads they took and end. They start no new read; a read that is under way when the stop comes may still bring lines, and those are delivered too. Output not read, and a line whose end has not arrived (unless it was already cut at the 64 KiB line limit), are not delivered. To end after everything logged so far, use `stop(flush=...)`. |
+| `stop()` | The readers notice at their next check (at least every 0.25 seconds while they wait for data), process every complete line of the network reads they took, deliver the matching entries (up to a flush marker, if one is among them) and end. Once a reader sees the stop, it starts no further read; a read already under way may still bring lines, and those are handled the same way. Output not read, and a line whose end has not arrived (unless it was already cut at the 64 KiB line limit), are not delivered. To end after everything logged so far, use `stop(flush=...)`. |
 | `stop(flush=seconds)` | Each device ends at a marker line written into its log after the call. See below. |
 | `kill()` | The readers end at their next check and queue nothing more. Queued entries are dropped. |
 | `join(timeout=None)` | Waits for the stream to end and returns its `StreamSummary`. |
@@ -245,7 +245,8 @@ raises nothing for it. Other rules:
 
 - `stop(flush=...)` does nothing after a `stop()` or an earlier
   `stop(flush=...)`. Before `start()` it is the same as `stop()`.
-- A `stop()` while a flush is pending cancels the flush.
+- A `stop()` while a flush is pending ends it as `cancelled`, unless its marker
+  is in the output the readers took; then it ends `done`.
 - A consumer that does not take entries holds a flush up until a `stop()` or
   `kill()`.
 - It takes the queue's lock for a moment, so do not call it from a signal
