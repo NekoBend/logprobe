@@ -46,10 +46,14 @@ RECV_SIZE = 64 * 1024
 TICK = 0.25
 _MAX_PAYLOAD = 0xFFFF
 # The largest shell protocol packet accepted from the adb server; a longer
-# declared length is a protocol error (see the module docs on limits).
+# declared length is a protocol error. The whole-packet reader holds a packet
+# until it is complete, so this bounds what one packet can make it hold. The
+# largest packets seen from adbd were 64-80 KiB (API 24 and 36 emulators).
 MAX_SHELL_PACKET = 16 * 1024 * 1024
 # The most output (stdout and stderr together) that a command logprobe runs
-# itself may produce: the package lists, getprop, date and the markers.
+# itself may produce: the package lists, getprop, date and the markers. The
+# largest such output seen was `dumpsys package packages`: about 0.95 MB for
+# 254 packages on an API 36 emulator.
 COMMAND_OUTPUT_LIMIT = 64 * 1024 * 1024
 
 type ShellEvent = tuple[Literal["stdout", "stderr"], bytes]
