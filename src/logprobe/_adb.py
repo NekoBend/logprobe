@@ -221,23 +221,31 @@ def resolve_server_address(explicit: str | None = None) -> ServerAddress:
 _EXTENSION = re.compile(r"\.[^\\/:]+")
 
 
+def _executable(path: Path) -> bool:
+    """True when ``path`` is an executable file; an unreadable path is a miss."""
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:  # before Python 3.14 is_file() can raise PermissionError
+        return False
+
+
 def _which(command: str, *, windows: bool | None = None) -> str | None:
-    """Like ``shutil.which``, but never relative to the current directory on Windows.
+    """Like ``shutil.which``, but on Windows it adds no current-directory search.
 
     ``shutil.which`` may try the current directory first on Windows, so a stray
     ``adb.exe`` in the working directory would be run. Here a bare command name
     is searched only in the fully qualified ``PATH`` entries (a drive and a
     root, or a UNC share): an empty entry, ``.``, ``./``, ``bin``, ``\\tools``,
     ``C:tools`` or any other entry that Windows would resolve against the
-    current directory or drive is skipped. Only ``PATHEXT`` extensions without
-    a path separator or colon are tried, so a candidate stays inside its
-    ``PATH`` entry. A command that contains a directory part is checked as
-    given. ``windows`` forces the platform for tests; the default is the real
-    one.
+    current directory or drive is skipped. A command that contains a directory
+    part is checked there only, as given. In both cases only ``PATHEXT``
+    extensions without a path separator or colon are added, so a candidate
+    stays in its directory. Other platforms use ``shutil.which``. ``windows``
+    forces the platform for tests; the default is the real one.
     """
     if windows is None:
         windows = sys.platform == "win32"
-    if not windows or Path(command).name != command:
+    if not windows:
         return shutil.which(command)
     extensions = [
         ext
@@ -248,13 +256,15 @@ def _which(command: str, *, windows: bool | None = None) -> str | None:
         names = [command]
     else:
         names = [command + ext for ext in extensions]
+    if Path(command).name != command:
+        return next((name for name in names if _executable(Path(name))), None)
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         entry = entry.strip().strip('"')
         if not entry or not Path(entry).is_absolute():
             continue
         for name in names:
             candidate = Path(entry, name)
-            if candidate.is_file() and os.access(candidate, os.X_OK):
+            if _executable(candidate):
                 return str(candidate)
     return None
 
@@ -270,8 +280,8 @@ def find_adb(explicit: str | None = None) -> str | None:
     On Windows ``PATH`` entries and SDK variables that are not fully qualified
     paths are skipped, so no directory is resolved against the current
     directory (see `_which`; a bare name given explicitly, such as ``adb``,
-    is searched the same way). The SDK path is checked as it is, with no
-    ``PATHEXT`` extension added.
+    is searched the same way), and the SDK's ``platform-tools\\adb.exe`` is
+    checked as it is, with no ``PATHEXT`` extension added.
     """
     if explicit is not None:
         return _which(explicit)
@@ -282,12 +292,17 @@ def find_adb(explicit: str | None = None) -> str | None:
     if on_path is not None:
         return on_path
     windows = sys.platform == "win32"
-    name = "adb.exe" if windows else "adb"
     for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         root = os.environ.get(variable)
-        if root and (not windows or Path(root).is_absolute()):
-            candidate = Path(root, "platform-tools", name)
-            if candidate.is_file() and os.access(candidate, os.X_OK):
+        if not root:
+            continue
+        if not windows:
+            found = shutil.which(str(Path(root) / "platform-tools" / "adb"))
+            if found is not None:
+                return found
+        elif Path(root).is_absolute():
+            candidate = Path(root, "platform-tools", "adb.exe")
+            if _executable(candidate):
                 return str(candidate)
     return None
 
@@ -476,9 +491,10 @@ def _start_server_environment(*, windows: bool | None = None) -> dict[str, str]:
     """Environment for ``adb start-server``: the default local server only.
 
     On Windows ``NoDefaultCurrentDirectoryInExePath`` is set too (unless it is
-    set already), so that a ``.bat`` or ``.cmd`` found as adb, which runs
-    through ``cmd.exe``, does not look up the commands it runs in the current
-    directory. ``windows`` forces the platform for tests.
+    set already), so that ``cmd.exe``, which runs a ``.bat`` or ``.cmd`` found
+    as adb, does not add the current directory when it looks up a bare command
+    name. (Relative entries of the ``PATH`` it inherits still apply there.)
+    ``windows`` forces the platform for tests.
     """
     if windows is None:
         windows = sys.platform == "win32"

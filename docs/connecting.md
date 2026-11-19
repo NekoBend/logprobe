@@ -71,8 +71,9 @@ When the server does not accept a connection, logprobe may run
 `ANDROID_ADB_SERVER_PORT`, and with `ADB_MDNS=0` added. So it can only start
 the default local server, and that server sends no mDNS discovery queries.
 On Windows `NoDefaultCurrentDirectoryInExePath=1` is added too, unless it is
-set, so that an `adb.bat` or `adb.cmd` found as adb does not look up the
-commands it runs in the current directory. The command may take up to 20
+set, so that when an `adb.bat` or `adb.cmd` is found as adb, `cmd.exe` does not
+add the current directory to the search for the commands it runs (relative
+`PATH` entries still apply there). The command may take up to 20
 seconds.
 
 logprobe looks for the `adb` executable in this order:
@@ -84,7 +85,8 @@ logprobe looks for the `adb` executable in this order:
    backslash, or a UNC share) is skipped, such as `.\`, `./`, `bin`, `\tools`
    or `C:tools`, because Windows would resolve it against the current
    directory or drive. The same holds when the `adb` argument or
-   `LOGPROBE_ADB` is a bare name such as `adb`.
+   `LOGPROBE_ADB` is a bare name such as `adb`. A path there (with a directory
+   part) is checked only where it points.
 4. `platform-tools/adb` under `ANDROID_HOME`, then under `ANDROID_SDK_ROOT`. On
    Windows a variable that is not a full path is skipped for the same reason;
    the error then says only that the adb executable was not found.
