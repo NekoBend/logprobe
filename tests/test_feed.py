@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import statistics
 import time
@@ -944,6 +945,25 @@ class TestChattyNotice:
         text = notice(4).replace("chatty", "other ")
         assert shape(feeder.feed(data(text))) == [1]
         assert feeder.gaps == 0
+
+    def test_a_count_of_more_than_18_digits_is_no_notice(self):
+        assert chatty_loss(f"uid=10014 expire {'9' * 18} lines") == int("9" * 18)
+        assert chatty_loss(f"uid=10014 expire {'9' * 19} lines") is None
+        # Beyond int()'s default limit of 4,300 digits: the line is delivered as
+        # an entry, the feed goes on, and no gap is counted.
+        feeder = Feeder("s1")
+        out = feeder.feed(data(notice(text=f"uid=10014 expire {'1' * 4301} lines")))
+        assert shape(out) == [1]
+        assert (feeder.gaps, feeder.lost) == (0, 0)
+
+    def test_the_total_of_the_counts_stays_serializable(self):
+        # Each count converts on its own, but two of them add up to 4,301 digits,
+        # which json.dumps (through int-to-str) refuses.
+        feeder = Feeder("s1")
+        big = notice(text=f"uid=10014 expire {'9' * 4300} lines")
+        feeder.feed(data(big, big))
+        json.dumps({"lost": feeder.lost})
+        assert (feeder.gaps, feeder.lost) == (0, 0)
 
     def test_the_count_ignores_trailing_blanks_and_one_line_wording(self):
         assert chatty_loss("uid=1000(system) expire 1 line ") == 1

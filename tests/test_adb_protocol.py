@@ -142,6 +142,12 @@ def test_parse_skips_blank_and_serial_only_lines() -> None:
     assert _adb.parse_devices("\n   \nlonely\n") == []
 
 
+def test_parse_skips_a_serial_with_a_nul_character() -> None:
+    # Such a serial could not be put into a request; the other lines still count.
+    text = "a\0b device product:x\nemulator-5554 device\n"
+    assert _adb.parse_devices(text) == [_adb.DeviceInfo("emulator-5554", "device")]
+
+
 def test_device_info_is_frozen() -> None:
     info = _adb.DeviceInfo("a", "device")
     with pytest.raises(AttributeError):

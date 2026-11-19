@@ -920,6 +920,8 @@ def parse_devices(text: str) -> list[DeviceInfo]:
     whatever lies between, which may contain spaces, as in ``no permissions
     (user in plugdev group; ...); see [http://...]``. Properties other than
     ``model``, ``product``, ``device`` and ``transport_id`` are dropped.
+    A line whose serial contains a NUL character is skipped: such a serial
+    could not be sent back to the server in a request.
     """
     result: list[DeviceInfo] = []
     for raw_line in text.splitlines():
@@ -929,7 +931,7 @@ def parse_devices(text: str) -> list[DeviceInfo]:
         else:
             serial, _, rest = line.partition(" ")
         tokens = rest.split()
-        if not serial or not tokens:
+        if not serial or not tokens or "\0" in serial:
             continue
         fields: dict[str, str] = {}
         while len(tokens) > 1 and _PROPERTY.fullmatch(tokens[-1]):
