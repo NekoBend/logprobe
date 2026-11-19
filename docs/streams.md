@@ -403,7 +403,7 @@ The summary counts what was read before the marker in `lines`, `unparsed`,
 So a line before the marker that does not parse still makes the summary
 incomplete. After a reconnect, a replayed line without a time (one that does
 not parse, or one whose time has no zone) cannot be matched, so it is
-delivered again, also when it came before the marker.
+delivered on replay, even when the start marker had caused it to be skipped.
 
 `start()` fails with `device_command_failed` when one of these commands exits
 with a non-zero status, ends without an exit status, does not finish within 5
