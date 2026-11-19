@@ -20,7 +20,9 @@ not accepted while logprobe is in alpha. To report a security vulnerability, see
   stopped. Where it can tell that lines may be missing or repeated, it reports
   a `Gap` record; some losses cannot be detected. With
   `detect_skips=True` it can also report lines that an older logd drops
-  without notice when the consumer falls behind.
+  without notice when the consumer falls behind; the reconnect it makes for
+  that can itself lose lines (reported as a gap), and in one test on API 24 it
+  did where a stream without the option lost none.
 - Parses logcat text in the `threadtime`, `brief`, `process`, `tag` and `raw`
   formats, from files (`read_file`) or any iterable of lines (`parse_lines`).
 - Filters entries with conditions such as
