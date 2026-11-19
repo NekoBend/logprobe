@@ -177,32 +177,40 @@ def real_sigint() -> Generator[None]:
         signal.signal(signal.SIGINT, previous)
 
 
-def interrupt_main_when(ready: threading.Event) -> threading.Thread:
-    """Send Ctrl-C to the main thread from another thread once ``ready`` is set.
+@contextlib.contextmanager
+def interrupt_main_when(ready: Callable[[], bool]) -> Generator[None]:
+    """Send Ctrl-C to the main thread from another thread once ``ready()`` is true.
 
-    The main thread sets ``ready`` after this returns, just before the wait under
-    test, so the interrupt never lands while the main thread is still in this
-    call's ``Thread.start()``. That waits in a ``threading.Condition``, and an
-    interrupt that lands after the wait let go of its lock but before the
-    ``finally`` that takes it back is running makes the ``with`` block raise
-    ``RuntimeError: release unlocked lock`` instead of KeyboardInterrupt.
-    Without the GIL the sending thread runs at the same time as the main
-    thread, so the interrupt can land there. The short pause after ``ready``
-    gives the main thread time to start waiting (best effort). Nothing is sent
-    if ``ready`` is not set within ``GUARD`` seconds.
-
-    Returns:
-        The sending thread, for the test to join.
+    ``ready`` must turn true only after the main thread has left this call's
+    ``Thread.start()`` and reached the wait under test. ``Thread.start()``
+    waits in a ``threading.Condition``, and an interrupt that lands after that
+    wait let go of its lock but before the ``finally`` that takes it back is
+    running makes the ``with`` block raise ``RuntimeError: release unlocked
+    lock`` instead of KeyboardInterrupt. Without the GIL the sending thread
+    runs at the same time as the main thread, so the interrupt can land there.
+    A short pause after ``ready()`` gives the main thread time to block (best
+    effort). On leaving, a sender that has not sent yet is cancelled, and the
+    sender is joined while the caller's SIGINT handler is still in place.
     """
+    cancel = threading.Event()
 
     def send() -> None:
-        if ready.wait(GUARD):
-            time.sleep(0.01)
+        deadline = time.monotonic() + GUARD
+        while not ready():
+            if cancel.wait(0.001) or time.monotonic() > deadline:
+                return
+        time.sleep(0.01)
+        if not cancel.is_set():
             _thread.interrupt_main()
 
     sender = threading.Thread(target=send, daemon=True)
     sender.start()
-    return sender
+    try:
+        yield
+    finally:
+        cancel.set()
+        sender.join(GUARD)
+        assert not sender.is_alive(), "the Ctrl-C sender did not end"
 
 
 # --- arguments ---------------------------------------------------------------
@@ -1579,31 +1587,23 @@ def test_lifecycle_ctrl_c_while_iterating_leaves_the_with_block_quickly(
 ) -> None:
     (device,) = attach(server, "a")
     server.add_sequence("logcat", hold("a", lines(0, 1)))
-    waiting = threading.Event()
-    with real_sigint():
+    outboxes: list[_stream.Outbox] = []
+
+    def iteration_waits() -> bool:
+        # The main thread has registered as a waiter for a chunk (second fetch).
+        return bool(outboxes) and bool(outboxes[0]._ready._waiters)  # ty: ignore[missing-attribute]
+
+    with real_sigint(), interrupt_main_when(iteration_waits):
         began = 0.0
         with pytest.raises(KeyboardInterrupt), device.stream() as s:  # noqa: PT012
             it = iter(s)
             assert next(it).message == "m0"
-            outbox = s._core.outbox
-            real_take = outbox.take
-
-            def take_once_ready(
-                timeout: float | None = None,
-            ) -> Sequence[object] | None:
-                # The second fetch: Ctrl-C comes while it waits for a chunk.
-                outbox.take = real_take
-                waiting.set()
-                return real_take(timeout)
-
-            outbox.take = take_once_ready
-            sender = interrupt_main_when(waiting)
-            began = time.monotonic()
-            for _ in it:  # waits for more; the interrupt arrives meanwhile
-                pass
+            with kill_if_hung(s):  # fails the test if Ctrl-C never comes
+                began = time.monotonic()
+                outboxes.append(s._core.outbox)
+                for _ in it:  # waits for more; the interrupt arrives meanwhile
+                    pass
         assert time.monotonic() - began < CTRL_C
-    assert waiting.is_set()
-    sender.join(GUARD)
     assert s._core.outbox.killed
     wait_threads_gone()
     assert server.wait_idle(GUARD)
@@ -1623,21 +1623,18 @@ def test_lifecycle_ctrl_c_with_a_stuck_callback_does_not_wait_for_it(
         inside.set()
         release.wait(GUARD)
 
-    with real_sigint():
+    go = threading.Event()
+    with real_sigint(), interrupt_main_when(go.is_set):
         began = 0.0
         with pytest.raises(KeyboardInterrupt), device.stream(on_entry=on_entry):  # noqa: PT012
             assert inside.wait(GUARD)
-            go = threading.Event()
-            sender = interrupt_main_when(go)
             began = time.monotonic()
             go.set()
-            # Short sleeps give the main thread frequent chances to handle the
-            # interrupt. (Not Event.wait slices, which wait in a Condition; see
-            # interrupt_main_when.)
+            # Poll for delivery in short sleeps. (Not Event.wait slices, which
+            # wait in a Condition; see interrupt_main_when.)
             for _ in range(int(GUARD / 0.01)):
                 time.sleep(0.01)
         assert time.monotonic() - began < CTRL_C
-    sender.join(GUARD)
     # The readers ended and their sockets are closed; the consumer thread
     # stays until the callback returns, and then calls nothing more.
     wait_until(lambda: [t.name for t in stream_threads()] == ["logprobe-consumer"])
