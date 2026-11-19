@@ -143,22 +143,39 @@ def test_parse_skips_blank_and_serial_only_lines() -> None:
 
 
 def test_parse_skips_a_serial_that_no_request_can_carry() -> None:
-    # A NUL character, bytes that were not UTF-8 (decoded as U+FFFD) and a
-    # serial too long for the features request; the other lines still count.
+    # A NUL character, bytes that were not UTF-8 (as list_devices decodes them)
+    # and a serial too long for the features request; the other lines count.
     longest = "s" * (0xFFFF - len("host-serial::features"))
-    text = (
-        "a\0b device product:x\n"
-        "bad\ufffdname device\n"
-        f"{longest}x device\n"
-        f"{longest} device\n"
-        "emulator-5554 device\n"
+    reply = (
+        b"a\0b device product:x\n"
+        b"bad\xffname device\n"
+        + f"{longest}x device\n{longest} device\n".encode()
+        + "fine\ufffdname".encode()
+        + b" device model:m\xff\nemulator-5554 dev\xffice\n"
     )
+    text = reply.decode(errors="surrogateescape")
     assert _adb.parse_devices(text) == [
         _adb.DeviceInfo(longest, "device"),
-        _adb.DeviceInfo("emulator-5554", "device"),
+        # A real U+FFFD is valid UTF-8 and can be sent back as it is.
+        _adb.DeviceInfo("fine\ufffdname", "device", model="m\ufffd"),
+        # Other fields show bytes that were not UTF-8 as U+FFFD.
+        _adb.DeviceInfo("emulator-5554", "dev\ufffdice"),
     ]
     # The longest kept serial still fits the request.
     _adb.encode_request(_adb.features_request(longest))
+
+
+def test_list_devices_skips_a_serial_that_is_not_utf8(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def reply(*_: object, **__: object) -> bytes:
+        return b"bad\xffname device\nemulator-5554 device model:m\xff\n"
+
+    monkeypatch.setattr(_adb, "host_query", reply)
+    address = _adb.ServerAddress("127.0.0.1", 1, is_default=False)
+    assert _adb.list_devices(address) == [
+        _adb.DeviceInfo("emulator-5554", "device", model="m\ufffd")
+    ]
 
 
 def test_device_info_is_frozen() -> None:

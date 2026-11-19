@@ -914,14 +914,24 @@ _NO_SERIAL = "(no serial number)"
 def _usable_serial(serial: str) -> bool:
     """True when ``serial`` from a device list can be used in a request.
 
-    Not: a NUL character, which the request check refuses; U+FFFD, which stands
-    for bytes that were not UTF-8 and so differ from what the server listed; or
-    a length that makes the longest request with it exceed the request limit.
-    (Line breaks cannot occur: the reply is split into lines first.)
+    Not: a NUL character, which the request check refuses; bytes that were not
+    UTF-8 (kept as surrogate escapes by `list_devices`), which no request could
+    send back unchanged; or a length that makes the longest request with it
+    exceed the request limit. (Line breaks cannot occur: the reply is split
+    into lines first.)
     """
-    if "\0" in serial or "\ufffd" in serial:
+    if "\0" in serial:
         return False
-    return len(features_request(serial).encode()) <= _MAX_PAYLOAD
+    try:
+        size = len(features_request(serial).encode())
+    except UnicodeEncodeError:
+        return False
+    return size <= _MAX_PAYLOAD
+
+
+def _readable(text: str) -> str:
+    """``text`` with surrogate escapes (bytes that were not UTF-8) as U+FFFD."""
+    return text.encode(errors="surrogateescape").decode(errors="replace")
 
 
 def parse_devices(text: str) -> list[DeviceInfo]:
@@ -950,8 +960,8 @@ def parse_devices(text: str) -> list[DeviceInfo]:
         while len(tokens) > 1 and _PROPERTY.fullmatch(tokens[-1]):
             key, _, value = tokens.pop().partition(":")
             if key in _INFO_KEYS:
-                fields[key] = value
-        result.append(DeviceInfo(serial, " ".join(tokens), **fields))
+                fields[key] = _readable(value)
+        result.append(DeviceInfo(serial, _readable(" ".join(tokens)), **fields))
     return result
 
 
@@ -960,7 +970,9 @@ def list_devices(
 ) -> list[DeviceInfo]:
     """Return every device the server knows, in any state (``host:devices-l``)."""
     reply = host_query(address, "host:devices-l", timeout=timeout)
-    return parse_devices(reply.decode(errors="replace"))
+    # Bytes that are not UTF-8 stay recognizable (surrogate escapes), so that
+    # a serial holding them is skipped rather than sent back changed.
+    return parse_devices(reply.decode(errors="surrogateescape"))
 
 
 def parse_features(reply: bytes) -> frozenset[str]:
