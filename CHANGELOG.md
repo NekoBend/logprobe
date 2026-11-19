@@ -24,12 +24,15 @@ commit that a user can see.
   `logprobe.astream`, which set `LogEntry.package`. Until now they raised
   `NotImplementedError`. The app of a line comes from its uid and the device's
   list of installed packages (`pm list packages -U`, or
-  `dumpsys package packages` on Android 7). (#3)
+  `dumpsys package packages` when `pm` rejects `-U` or gives no usable list,
+  as on Android 7). (#3)
 - `logprobe.__version__`. It is read from the installed package's metadata
-  when first used; a source tree that is not installed gives `0+unknown`. (#10)
+  when first used, and is `0+unknown` when no installed metadata is found.
+  (#10)
 - Gaps are also logged on the `logprobe` logger: the first gap of each reason
-  on a device is a WARNING, later ones are counted, and one WARNING at the end
-  of the device's read gives the counts. (#15)
+  on a device is a WARNING, later ones are counted, and if any reason
+  repeated, one WARNING at the end of the device's read gives the counts.
+  (#15)
 
 ### Fixed
 
@@ -59,8 +62,8 @@ commit that a user can see.
   exchange instead of each receive. A dump still has no overall limit (see
   #24). (#22)
 - A reconnect no longer fails when a delivered line has a time without a
-  zone; such lines are not matched on resume, so they can be delivered again,
-  even when `since="now"` had skipped them before the reconnect.
+  zone; such lines are not matched on resume, so they can be delivered on
+  replay, including lines that `since="now"` had skipped.
   The asyncio stream counts bytes that complete no line as data when it
   decides whether the connection went quiet. (#23)
 
