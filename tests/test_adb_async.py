@@ -666,14 +666,24 @@ def test_read_part_delivers_the_part_of_a_packet_cut_short_at_the_end() -> None:
     assert result.receives == 3  # the two chunks, then the end of the stream
 
 
-def test_a_reply_that_trickles_in_is_not_cut_by_the_per_step_limit(
+def test_a_host_reply_that_trickles_in_is_cut_at_the_timeout(
     client: Client,
 ) -> None:
-    # One byte every 40 ms: the whole reply takes far longer than the 0.15 s
-    # limit, but no single wait does.
+    # One byte every 40 ms: no single wait outlasts the 0.15 s limit, but the
+    # whole reply does, and the limit covers the whole exchange.
+    reply = b"OKAY%04x%s" % (len(b"cmd"), b"cmd")
+    with trickle_server(reply, 0.04) as address, pytest.raises(LogprobeError) as raised:
+        client.features(address, timeout=0.15)
+    assert raised.value.code == "adb_error"
+    assert str(raised.value) == "timed out waiting for the adb server"
+
+
+def test_a_host_reply_that_trickles_in_within_the_timeout_is_whole(
+    client: Client,
+) -> None:
     reply = b"OKAY%04x%s" % (len(b"cmd"), b"cmd")
     with trickle_server(reply, 0.04) as address:
-        assert client.features(address, timeout=0.15) == {"cmd"}
+        assert client.features(address, timeout=2.0) == {"cmd"}
 
 
 def test_the_requests_on_the_wire_are_exactly_these_bytes(client: Client) -> None:

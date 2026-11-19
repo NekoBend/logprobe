@@ -143,10 +143,17 @@ Raised when the adb server answered in a way logprobe cannot use:
   read logcat output. Raised by `Device.dump()`, `Device.adump()` and when a
   stream starts.
 - The server or device broke the protocol: an invalid status, an invalid
-  length, or a broken shell packet.
+  length, a broken shell packet, or a shell packet that declares more than
+  16 MiB.
+- A command that logprobe runs itself (the package list, `getprop`, `date`,
+  the start marker) wrote more than 64 MiB of output. `Device.shell()` has no
+  such limit. A flush marker command that fails this way raises nothing: it
+  counts as not having run, as when the connection is lost (see
+  [streams.md](streams.md)).
 - Sending to or receiving from the server failed, the server closed the
   connection in the middle of a reply, or the server did not answer within
-  10 seconds.
+  10 seconds. For a query to the server itself (the device list, a device's
+  features), the 10 seconds after connecting also cover the whole reply.
 - A stream could not start because the adb server did not answer in time.
 - A running stream gave up reconnecting and the last attempt failed in one
   of these ways, or with a timeout.
@@ -157,6 +164,8 @@ Raised when the adb server answered in a way logprobe cannot use:
 | `missing_feature` | `"shell_v2"`, when the device lacks it. |
 | `status` | The invalid status the server sent. |
 | `raw` | The invalid length field the server sent. |
+| `length` | The declared length of a shell packet over the limit. |
+| `command`, `limit` | The command whose output passed the limit, and the limit in bytes. |
 
 Many `adb_error` cases have only `serial`, or no details at all.
 

@@ -376,6 +376,133 @@ def test_windows_lookup_skips_empty_and_dot_entries(
     assert _adb._which("adb", windows=True) is None
 
 
+def test_windows_lookup_skips_every_relative_entry(
+    windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each of these would resolve against the current directory, which holds an
+    # adb.exe directly and one in "bin".
+    sub = windows_lookup["cwd"] / "bin"
+    sub.mkdir()
+    (sub / "adb.exe").write_bytes(b"")
+    (sub / "adb.exe").chmod(0o755)
+    for entry in ("./", ".//", "bin", "./bin", "bin/..", "bin/../."):
+        monkeypatch.setenv("PATH", entry)
+        assert _adb._which("adb", windows=True) is None, entry
+    # An absolute entry after them is still searched.
+    path = os.pathsep.join(["./", "bin", str(windows_lookup["path"])])
+    monkeypatch.setenv("PATH", path)
+    found = _adb._which("adb", windows=True)
+    assert found is not None
+    assert Path(found).parent == windows_lookup["path"]
+
+
+def test_find_adb_on_a_windows_platform_skips_a_relative_sdk_root(
+    windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("LOGPROBE_ADB", raising=False)
+    monkeypatch.setenv("PATH", str(windows_lookup["cwd"].parent / "nowhere"))
+    cwd = windows_lookup["cwd"]
+    for root in (cwd / "sdk", cwd):
+        tools = root / "platform-tools"
+        tools.mkdir(parents=True)
+        (tools / "adb.exe").write_bytes(b"")
+        (tools / "adb.exe").chmod(0o755)
+    for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        monkeypatch.delenv("ANDROID_HOME", raising=False)
+        monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+        for relative in ("sdk", ".", "./sdk"):
+            monkeypatch.setenv(variable, relative)
+            assert _adb.find_adb() is None, (variable, relative)
+        monkeypatch.setenv(variable, str(cwd / "sdk"))
+        assert_same_path(_adb.find_adb(), cwd / "sdk" / "platform-tools" / "adb.exe")
+
+
+def test_find_adb_on_a_windows_platform_goes_on_past_an_unreadable_sdk_root(
+    windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("LOGPROBE_ADB", raising=False)
+    monkeypatch.setenv("PATH", str(windows_lookup["cwd"].parent / "nowhere"))
+    home = windows_lookup["cwd"].parent / "home"
+    sdk = windows_lookup["cwd"].parent / "sdk"
+    (sdk / "platform-tools").mkdir(parents=True)
+    (sdk / "platform-tools" / "adb.exe").write_bytes(b"")
+    (sdk / "platform-tools" / "adb.exe").chmod(0o755)
+    monkeypatch.setenv("ANDROID_HOME", str(home))
+    monkeypatch.setenv("ANDROID_SDK_ROOT", str(sdk))
+    is_file = Path.is_file
+
+    def denied(path: Path) -> bool:
+        if home in path.parents:
+            raise PermissionError(13, "denied", str(path))
+        return is_file(path)
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    assert_same_path(_adb.find_adb(), sdk / "platform-tools" / "adb.exe")
+
+
+def test_windows_lookup_ignores_pathext_entries_with_a_separator(
+    windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # "adb" + "/../../cwd/adb.exe" would lead out of the PATH entry into the
+    # current directory.
+    on_path = windows_lookup["path"]
+    (on_path / "adb.exe").unlink()
+    (on_path / "adb").mkdir()
+    (on_path / "adb.x").mkdir()
+    monkeypatch.setenv("PATH", str(on_path))
+    odd_extensions = (
+        "/../../cwd/adb.exe",
+        ".x/../../cwd/adb.exe",
+        "\\..\\..\\cwd\\adb.exe",
+        ".x\\..\\..\\cwd\\adb.exe",
+        ":x",
+        ".x:y",
+    )
+    for odd in odd_extensions:
+        monkeypatch.setenv("PATHEXT", f".com;{odd}")
+        assert _adb._which("adb", windows=True) is None, odd
+        # The same holds for a command given with a directory part.
+        assert _adb._which(str(on_path / "adb"), windows=True) is None, odd
+    # An ordinary extension is still added to such a command.
+    monkeypatch.setenv("PATHEXT", ".com;.exe")
+    assert _adb._which(str(windows_lookup["cwd"] / "adb"), windows=True) == str(
+        windows_lookup["cwd"] / "adb.exe"
+    )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path rules")
+def test_windows_lookup_skips_entries_relative_to_the_current_drive(
+    windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd = windows_lookup["cwd"]
+    sub = cwd / "bin"
+    sub.mkdir()
+    (sub / "adb.exe").write_bytes(b"")
+    entries = [".\\", ".\\bin"]
+    roots = ["sdk", ".\\sdk"]
+    # The rooted and drive-relative forms need a drive letter, not a UNC share.
+    if len(cwd.drive) == 2 and cwd.drive.endswith(":"):
+        rooted = "\\" + str(cwd)[len(cwd.drive) :].lstrip("\\")  # the drive's root
+        entries += [rooted, cwd.drive + "bin", f'"{cwd.drive}bin"']
+        roots += [rooted + "\\sdk", cwd.drive + "sdk"]
+    for entry in entries:
+        monkeypatch.setenv("PATH", entry)
+        assert _adb._which("adb") is None, entry
+    monkeypatch.setenv("PATH", f'"{windows_lookup["path"]}"')
+    assert_same_path(_adb._which("adb"), windows_lookup["path"] / "adb.exe")
+    tools = cwd / "sdk" / "platform-tools"
+    tools.mkdir(parents=True)
+    (tools / "adb.exe").write_bytes(b"")
+    monkeypatch.setenv("PATH", str(cwd.parent / "nowhere"))
+    monkeypatch.delenv("LOGPROBE_ADB", raising=False)
+    monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+    for root in roots:
+        monkeypatch.setenv("ANDROID_HOME", root)
+        assert _adb.find_adb() is None, root
+
+
 def test_windows_lookup_matches_pathext_case_insensitively(
     windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -646,6 +773,21 @@ def test_start_timeout_without_output_has_no_output_detail(
 
     monkeypatch.setattr(_adb.subprocess, "run", hang)
     assert "start_server_output" not in unavailable().details
+
+
+def test_start_server_environment_on_windows_turns_off_the_current_directory_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    name = "NoDefaultCurrentDirectoryInExePath"
+    monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv(name.upper(), raising=False)
+    assert _adb._start_server_environment(windows=True)[name] == "1"
+    assert name not in _adb._start_server_environment(windows=False)
+    # A value that is set already is kept, whatever the case of its name.
+    monkeypatch.setenv(name.upper(), "yes")
+    env = _adb._start_server_environment(windows=True)
+    assert env[name.upper()] == "yes"
+    assert name not in env
 
 
 @pytest.mark.usefixtures("adb_on_path")

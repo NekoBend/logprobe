@@ -45,6 +45,17 @@ RECV_SIZE = 64 * 1024
 # seconds before the callback is asked again.
 TICK = 0.25
 _MAX_PAYLOAD = 0xFFFF
+# The largest shell protocol packet accepted from the adb server; a longer
+# declared length is a protocol error. The whole-packet reader holds a packet
+# until it is complete, so this bounds what one packet can make it hold. The
+# largest packets seen from adbd were 64-80 KiB (API 24 and 36 emulators).
+MAX_SHELL_PACKET = 16 * 1024 * 1024
+# The most output (stdout and stderr together) that a command logprobe runs
+# itself may produce: the package lists, getprop, date and the markers. The
+# largest such output seen was `dumpsys package packages`: about 0.95 MB for
+# 254 packages on an API 36 emulator. It is checked per whole packet, so the
+# reader may hold up to one more packet (``MAX_SHELL_PACKET``) meanwhile.
+COMMAND_OUTPUT_LIMIT = 64 * 1024 * 1024
 
 type ShellEvent = tuple[Literal["stdout", "stderr"], bytes]
 type ShellPiece = tuple[Literal["stdout", "stderr"], memoryview, bool]
@@ -217,35 +228,54 @@ def resolve_server_address(explicit: str | None = None) -> ServerAddress:
 # ---------------------------------------------------------------------------
 
 
-def _which(command: str, *, windows: bool | None = None) -> str | None:
-    """Like ``shutil.which``, but on Windows never look in the current directory.
+# A PATHEXT extension that is tried: a dot, then no path separator or colon.
+_EXTENSION = re.compile(r"\.[^\\/:]+")
 
-    ``shutil.which`` tries the current directory first on Windows, so a stray
+
+def _executable(path: Path) -> bool:
+    """True when ``path`` is an executable file; an unreadable path is a miss."""
+    try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:  # before Python 3.14 is_file() can raise PermissionError
+        return False
+
+
+def _which(command: str, *, windows: bool | None = None) -> str | None:
+    """Like ``shutil.which``, but on Windows it adds no current-directory search.
+
+    ``shutil.which`` may try the current directory first on Windows, so a stray
     ``adb.exe`` in the working directory would be run. Here a bare command name
-    is searched only in the ``PATH`` entries (empty and ``.`` entries are
-    skipped). A command that contains a directory part is checked as given.
-    ``windows`` forces the platform for tests; the default is the real one.
+    is searched only in the fully qualified ``PATH`` entries (a drive and a
+    root, or a UNC share): an empty entry, ``.``, ``./``, ``bin``, ``\\tools``,
+    ``C:tools`` or any other entry that Windows would resolve against the
+    current directory or drive is skipped. A command that contains a directory
+    part is checked there only, as given. In both cases only ``PATHEXT``
+    extensions without a path separator or colon are added, so a candidate
+    stays in its directory. Other platforms use ``shutil.which``. ``windows``
+    forces the platform for tests; the default is the real one.
     """
     if windows is None:
         windows = sys.platform == "win32"
-    if not windows or Path(command).name != command:
+    if not windows:
         return shutil.which(command)
     extensions = [
         ext
         for ext in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(";")
-        if ext
+        if _EXTENSION.fullmatch(ext)
     ]
     if any(command.lower().endswith(ext.lower()) for ext in extensions):
         names = [command]
     else:
         names = [command + ext for ext in extensions]
+    if Path(command).name != command:
+        return next((name for name in names if _executable(Path(name))), None)
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         entry = entry.strip().strip('"')
-        if not entry or entry == os.curdir:
+        if not entry or not Path(entry).is_absolute():
             continue
         for name in names:
             candidate = Path(entry, name)
-            if candidate.is_file() and os.access(candidate, os.X_OK):
+            if _executable(candidate):
                 return str(candidate)
     return None
 
@@ -258,6 +288,11 @@ def find_adb(explicit: str | None = None) -> str | None:
     ``ANDROID_SDK_ROOT``. The first place that is set decides for the explicit
     argument and ``LOGPROBE_ADB``: if what they name is not an executable,
     the result is None rather than a silent fall-back to another adb.
+    On Windows ``PATH`` entries and SDK variables that are not fully qualified
+    paths are skipped, so no directory is resolved against the current
+    directory (see `_which`; a bare name given explicitly, such as ``adb``,
+    is searched the same way), and the SDK's ``platform-tools\\adb.exe`` is
+    checked as it is, with no ``PATHEXT`` extension added.
     """
     if explicit is not None:
         return _which(explicit)
@@ -267,13 +302,19 @@ def find_adb(explicit: str | None = None) -> str | None:
     on_path = _which("adb")
     if on_path is not None:
         return on_path
-    name = "adb.exe" if sys.platform == "win32" else "adb"
+    windows = sys.platform == "win32"
     for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         root = os.environ.get(variable)
-        if root:
-            found = _which(str(Path(root) / "platform-tools" / name))
+        if not root:
+            continue
+        if not windows:
+            found = shutil.which(str(Path(root) / "platform-tools" / "adb"))
             if found is not None:
                 return found
+        elif Path(root).is_absolute():
+            candidate = Path(root, "platform-tools", "adb.exe")
+            if _executable(candidate):
+                return str(candidate)
     return None
 
 
@@ -454,14 +495,29 @@ _SERVER_ADDRESS_VARIABLES = (
 )
 
 
-def _start_server_environment() -> dict[str, str]:
-    """Environment for ``adb start-server``: the default local server only."""
+_NO_CWD_SEARCH = "NoDefaultCurrentDirectoryInExePath"
+
+
+def _start_server_environment(*, windows: bool | None = None) -> dict[str, str]:
+    """Environment for ``adb start-server``: the default local server only.
+
+    On Windows ``NoDefaultCurrentDirectoryInExePath`` is set too (unless it is
+    set already), so that ``cmd.exe``, which runs a ``.bat`` or ``.cmd`` found
+    as adb, does not add the current directory when it looks up a bare command
+    name. (Relative entries of the ``PATH`` it inherits still apply there.)
+    ``windows`` forces the platform for tests.
+    """
+    if windows is None:
+        windows = sys.platform == "win32"
     env = {
         name: value
         for name, value in os.environ.items()
         if name not in _SERVER_ADDRESS_VARIABLES
     }
     env["ADB_MDNS"] = "0"
+    # Windows names are case-insensitive, and os.environ keeps them uppercase.
+    if windows and _NO_CWD_SEARCH.upper() not in {name.upper() for name in env}:
+        env[_NO_CWD_SEARCH] = "1"
     return env
 
 
@@ -494,7 +550,8 @@ def ensure_server(
     ``ADB_SERVER_SOCKET``, ``ANDROID_ADB_SERVER_ADDRESS`` and
     ``ANDROID_ADB_SERVER_PORT`` are removed, so it can only start the default
     local server, and with ``ADB_MDNS=0`` added, so that the server it starts
-    does not send mDNS discovery queries on the local network.
+    does not send mDNS discovery queries on the local network. On Windows
+    ``NoDefaultCurrentDirectoryInExePath=1`` is added as well, unless it is set.
 
     Raises:
         LogprobeError: ``adb_server_unavailable`` when the server stays
@@ -866,15 +923,24 @@ def host_query(
 ) -> bytes:
     """Send one ``host:`` request and return its length-prefixed reply.
 
+    ``timeout`` limits the connection attempt, and then once more the whole
+    exchange after it: a reply that trickles in byte by byte cannot keep the
+    call waiting longer than that.
+
     Raises:
+        LogprobeError: ``adb_error`` when the exchange does not finish within
+            ``timeout`` seconds after connecting.
         Cancelled: If ``cancelled`` is given and returned true; the socket is
             closed before this is raised.
     """
     sock = connect(address, timeout, cancelled=cancelled)
     try:
-        _send_request(sock, payload, serial, None, cancelled, timeout)
-        size = _read_length(sock, None, cancelled, timeout)
-        return _recv_exact(sock, size, None, cancelled, timeout)
+        deadline = time.monotonic() + timeout
+        _send_request(sock, payload, serial, deadline, cancelled)
+        size = _read_length(sock, deadline, cancelled)
+        return _recv_exact(sock, size, deadline, cancelled)
+    except TimeoutError as error:
+        raise server_timeout() from error
     finally:
         sock.close()
 
@@ -1123,6 +1189,17 @@ class ShellV2Decoder:
                 if self._kind == _ID_EXIT and self._remaining == 0:
                     self._done = True
                     return pieces, None, protocol_error(_EMPTY_EXIT)
+                if self._remaining > MAX_SHELL_PACKET:
+                    self._done = True
+                    return (
+                        pieces,
+                        None,
+                        protocol_error(
+                            "the adb server sent a shell packet longer than "
+                            f"{MAX_SHELL_PACKET} bytes",
+                            length=self._remaining,
+                        ),
+                    )
                 continue
             take = min(self._remaining, size - pos)
             piece = view[pos : pos + take]
@@ -1162,8 +1239,9 @@ class ShellV2Decoder:
         unless the exit packet was completed by ``data``.
 
         Raises:
-            LogprobeError: ``adb_error`` for an empty exit packet or for bytes
-                after the exit packet.
+            LogprobeError: ``adb_error`` for an empty exit packet, for bytes
+                after the exit packet, or for a packet that declares more than
+                ``MAX_SHELL_PACKET`` bytes.
         """
         pieces, status, error = self.feed_pieces(data)
         if error is not None:
@@ -1292,8 +1370,9 @@ class ShellStream:
         Raises:
             TimeoutError: If a timeout or deadline was set and expired.
             LogprobeError: ``adb_error`` if the device sent an empty exit
-                packet. Output received before it is returned first. Bytes
-                after the exit packet are ignored.
+                packet or a packet that declares more than
+                ``MAX_SHELL_PACKET`` bytes. Output received before it is
+                returned first. Bytes after the exit packet are ignored.
             Cancelled: If ``cancelled()`` returned true; the stream is closed
                 (by this thread, which owns the socket) before it is raised.
         """
@@ -1448,6 +1527,7 @@ def run_shell(
     args: Sequence[str],
     timeout: float | None = 30.0,
     cancelled: Callable[[], bool] | None = None,
+    max_output: int | None = None,
 ) -> ShellResult:
     """Run a command on a device to completion and collect its output.
 
@@ -1458,14 +1538,15 @@ def run_shell(
 
     When the connection ends without an exit status, the stderr of the result
     ends with the received part of a stderr packet that was cut off; its
-    stdout holds only the packets that arrived whole.
+    stdout holds only the packets that arrived whole. ``max_output`` limits
+    stdout and stderr together, in bytes (None: no limit).
 
     Raises:
         TimeoutError: If everything did not finish within ``timeout`` seconds
             (a `CommandTimeoutError`, with the stderr received by then, the
             received part of an unfinished stderr packet included).
         LogprobeError: As :func:`open_shell`, or ``adb_error`` on a protocol
-            violation.
+            violation or when the output exceeds ``max_output``.
         Cancelled: If ``cancelled`` is given and returned true; the socket is
             closed before this is raised.
     """
@@ -1481,14 +1562,40 @@ def run_shell(
             stream.set_deadline(deadline)
             while (event := stream.read(cancelled)) is not None:
                 (out if event[0] == "stdout" else err).extend(event[1])
+                check_output(args, out, err, max_output)
     except TimeoutError:
         if opened is not None:
             err += opened.held_stderr()
+        check_output(args, out, err, max_output)
         msg = f"command did not finish within {timeout} seconds"
         raise CommandTimeoutError(msg, bytes(err)) from None
     if stream.exit_status is None:  # the connection ended inside a packet
         err += stream.held_stderr()
+        check_output(args, out, err, max_output)
     return ShellResult(stream.exit_status, bytes(out), bytes(err))
+
+
+def check_output(
+    args: Sequence[str], out: bytearray, err: bytearray, limit: int | None
+) -> None:
+    """Raise `output_too_long` when ``out`` and ``err`` together pass ``limit``.
+
+    It runs after every whole packet and after the held part of a cut stderr
+    packet is added, so the output kept is never over the limit; what the
+    reader holds of an unfinished packet meanwhile is bounded by
+    ``MAX_SHELL_PACKET``.
+    """
+    if limit is not None and len(out) + len(err) > limit:
+        raise output_too_long(args, limit)
+
+
+def output_too_long(args: Sequence[str], limit: int) -> LogprobeError:
+    """The error for a command whose output passed ``limit`` bytes."""
+    return protocol_error(
+        f"the command wrote more than {limit} bytes of output",
+        command=" ".join(args),
+        limit=limit,
+    )
 
 
 _LOGCAT_FORMAT_WORDS = ("threadtime", "year", "usec", "zone", "uid")
