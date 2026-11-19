@@ -548,11 +548,15 @@ With `detect_skips=True`:
   old one; lines lost in a log buffer from which nothing was read in the last
   second before the stall can go unreported. The wait counts as waiting for room, so it does not use up
   the budget of `stop(flush=...)`.
-- Closing the connection can itself cost lines: those the log buffer drops
-  before the new connection replays them are lost, and the `stalled` gap says
-  lines are missing. In one test on an API 24 emulator (a 256 KiB main buffer,
-  about 1.5 times that written while the consumer was paused, a queue of 100
-  lines), the stream lost lines this way with the option and none without it.
+- Closing the connection can itself cost lines: unread lines that the log
+  buffer on the device overwrites before the new connection replays them are
+  lost. They are reported as a gap with the cause `stalled` where the gap check
+  can tell; the losses listed as unreported under
+  [Reconnect and resume](#reconnect-and-resume) stay unreported. In one test on
+  an API 24 emulator, the test wrote about 1.5 times the capacity of the
+  256 KiB main buffer while the consumer was paused, with the queue limited to
+  100 lines; the stream lost lines this way with the option and none without
+  it.
 - Other API levels cut a slow reader off themselves, which the stream always
   detects, so the option is ignored for them. An INFO message says so.
 - A device whose API level cannot be read (the command fails, prints no number
