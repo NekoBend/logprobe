@@ -53,6 +53,9 @@ not accepted while logprobe is in alpha. To report a security vulnerability, see
 
 - Python 3.12 or later. CI tests Python 3.12, 3.13 and 3.14 on Linux and
   Windows; macOS is untested.
+  CI does not test the free-threaded build (3.14t). In a one-off check in
+  November 2026, 155 test cases chosen for thread and timing races passed
+  50 times in a row on 3.14t with the GIL disabled, on Linux and on Windows.
 - An adb server. When no server answers at the default address
   (127.0.0.1:5037), logprobe may run `adb start-server`; the conditions are in
   [Starting the adb server](docs/connecting.md#starting-the-adb-server). Pass

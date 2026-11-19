@@ -36,6 +36,11 @@ in memory. A full log buffer can hold hundreds of thousands of lines, so pass
   the last 1,000 records, not the last 1,000 warnings. A record whose message
   has several lines gives one entry per line, so the list can hold more than
   N entries.
+- Known limitation: logprobe does not count the records itself. It keeps every
+  line until logcat exits, so an adb server or device that ignores `-t`, or
+  never ends the output, can make the list and the time the dump takes grow
+  without limit. Only a pause of 30 seconds with no byte ends the dump, with
+  `TimeoutError`.
 - `where` and the shortcuts are those of a stream; see
   [conditions.md](conditions.md).
 - A snapshot returns no gaps and no summary; it logs the gaps it finds (a
