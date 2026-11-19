@@ -2756,8 +2756,16 @@ def stream(
             queue is at most half full (in lines and in bytes), and connects
             again as after any other disconnect; a gap with the cause
             ``stalled`` is reported when the replay check finds lines missing
-            or cannot verify that the new connection continues the old one. That
-            wait counts as waiting for room, so it does not use up the budget
+            or cannot verify that the new connection continues the old one.
+            Closing the connection can itself cost lines: unread lines that the
+            device's log buffer overwrites before the new connection replays
+            them are lost, and they are reported as a ``stalled`` gap only
+            where the replay check can tell (see the unreported losses above).
+            In one test on an API 24 emulator, the test wrote about 1.5 times
+            the capacity of the 256 KiB main buffer while the consumer was
+            paused, with the queue limited to 100 lines; the stream lost lines
+            this way with the flag and none without it. The wait for the
+            queue counts as waiting for room, so it does not use up the budget
             of ``stop(flush=)``. Other API levels cut a slow reader off
             themselves, which the stream always detects, so the flag is
             ignored for them (an INFO message says so). A device whose API
