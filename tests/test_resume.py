@@ -955,3 +955,37 @@ def test_the_stall_limit_is_read_when_asked(monkeypatch):
 
     monkeypatch.setattr(_resume, "STALL_AFTER", 0.25)
     assert stall_limit(24) == 0.25
+
+
+# --- times with and without a zone -------------------------------------------
+
+
+def unzoned(seconds: float, msg: str = "hello") -> str:
+    """A line like `line`, but without the zone (a producer that breaks -v zone)."""
+    return line(seconds, msg).replace(" +0000", "", 1)
+
+
+def test_a_line_without_a_zone_among_zoned_lines_does_not_break_the_plan() -> None:
+    feeder = Feeder("s1")
+    feeder.feed(data(line(10, "A"), unzoned(10.5, "B"), line(11, "C")))
+    plan = plan_resume(feeder, "disconnected", NOW)
+    assert plan.check is not None
+    feeder.begin_connection(plan.check)
+    # The zoned lines are replays; the line without a zone counts as a line
+    # without a time, so it is never matched and is delivered again.
+    out = feeder.feed(data(line(10, "A"), unzoned(10.5, "B"), line(11, "C")))
+    assert messages(out) == ["B"]
+    assert feeder.duplicates == 2
+
+
+def test_the_check_admits_a_line_of_the_other_kind_as_one_without_a_time() -> None:
+    feeder = Feeder("s1")
+    feeder.feed(data(line(10, "A")))
+    plan = plan_resume(feeder, "disconnected", NOW)
+    assert plan.check is not None
+    feeder.begin_connection(plan.check)
+    # Without a zone, and "older" than the start by its clock: no comparison
+    # with the zoned cursor is made, so no TypeError and no older-unread flag.
+    out = feeder.feed(data(unzoned(1, "X"), line(10, "A"), line(12, "D")))
+    assert messages(out) == ["X", "D"]
+    assert plan.check.flags.older_unread is False

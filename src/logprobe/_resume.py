@@ -590,12 +590,14 @@ class ResumeCheck:
 
         A line without a time (a divider, or one that did not parse) is never
         matched and never marks an older unread line, but once every expected
-        line has come back it ends the check like any other new line.
+        line has come back it ends the check like any other new line. A line
+        whose time has a zone when the cursor's has none, or the reverse,
+        counts as a line without a time (`comparable`).
         """
         self._idle = 0.0
         if self._finished:
             return True
-        if logged_at is not None:
+        if logged_at is not None and comparable(logged_at, self._cursor):
             data = line.data
             count = self._expected.get(data, 0)
             if count:
@@ -695,6 +697,18 @@ class ResumePlan:
     check: ResumeCheck | None
 
 
+def comparable(moment: datetime, other: datetime) -> bool:
+    """True when ``moment`` and ``other`` can be compared: both have a zone or
+    neither has.
+
+    logcat prints the zone (``-v zone``) on every line, so a line without one
+    among lines with one (or the reverse) comes from a broken producer; the
+    resume check treats such a line as having no time, as the feeder's cursor
+    ignores it.
+    """
+    return (moment.tzinfo is None) == (other.tzinfo is None)
+
+
 def plan_resume(
     feeder: _History,
     cause: GapCause,
@@ -727,7 +741,7 @@ def plan_resume(
     for framed in feeder.history_since(start):
         text = decode_line(framed.data, cut=framed.truncated)
         entry = parser.parse(text, ctx)
-        if entry is None:
+        if entry is None or not comparable(entry.logged_at, start):
             continue
         bucket = expected if entry.logged_at >= start else older
         bucket[framed.data] = bucket.get(framed.data, 0) + 1

@@ -1036,6 +1036,45 @@ def test_data_that_completes_no_line_still_counts_as_data_for_the_check(
     run(scenario)
 
 
+class _EmptyReads(_ScriptedStream):
+    """Like `_ScriptedStream`, with ``b""`` for a network read that brought bytes
+    but no output (an empty packet, or a packet header alone): the wait runs
+    out with nothing decoded, but ``received_at`` moves."""
+
+    async def read_part(self) -> tuple[str, bytes] | None:
+        if self._chunks and self._chunks[0] == b"":
+            self._chunks.pop(0)
+            self._clock.now += 0.6
+            self.received_at += 1.0
+            raise TimeoutError
+        return await super().read_part()
+
+
+def test_bytes_that_complete_no_output_still_count_as_data_for_the_check(
+    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (device,) = attach(server, "a")
+    unit = _astream._AUnit(device, None, 0.0)
+    unit.feeder.feed(at(10, "A"))
+    plan = _resume.plan_resume(unit.feeder, "disconnected", BASE)
+    unit.feeder.begin_connection(plan.check)
+    clock = _Clock()
+    monkeypatch.setattr(_astream, "monotonic", clock)
+    # 2.4 s of reads that bring bytes but no output, then the replayed line:
+    # never one second (the idle time of a check) without data.
+    stream = _EmptyReads(clock, b"", b"", b"", b"", at(10, "A"), None)
+    run_ = _astream._ARun(stream, "a", plan.check)  # ty: ignore[invalid-argument-type]
+    core = _astream._ACore([unit], _astream.AsyncOutbox(10, 1 << 20))
+
+    async def scenario() -> None:
+        await _astream._read(core, unit, run_)
+        assert await core.outbox.take(0) is None  # no gap, no line: A was a replay
+        assert unit.feeder.duplicates == 1
+        assert run_.pending() is not None  # the check still waits for a new line
+
+    run(scenario)
+
+
 @pytest.mark.parametrize("request_name", ["request_stop", "request_kill"])
 def test_a_check_that_ends_on_a_full_queue_does_not_read_again_after_a_stop(
     server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch, request_name: str

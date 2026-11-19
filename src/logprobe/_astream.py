@@ -907,20 +907,23 @@ async def _read(core: _ACore, unit: _AUnit, run: _ARun) -> None:
             await _end_read(core, unit, run)
             return
         began = monotonic()
+        seen = stream.received_at
         batch = await (_take_decoded(stream) if late else gather(stream, limit))
         run.broken = batch.broken
+        # Bytes that complete no output (an empty packet, a header alone) are
+        # data for the resume check too, as on the blocking stream.
+        arrived = stream.received_at != seen
         await asyncio.sleep(0)  # a fast device must not starve the other tasks
+        if batch or arrived:
+            _note_data(run)
         if not batch and not batch.ended and batch.broken is None:
-            if await _quiet(core, unit, run, monotonic() - began):
+            if not arrived and await _quiet(core, unit, run, monotonic() - began):
                 return
             continue
         if outbox.killed:
             # Drop the batch and the rest, but still raise a protocol error.
             await _discard_decoded(run, batch.broken)
             return
-        check = run.pending()
-        if check is not None and batch:
-            check.received()
         err = b"".join(batch.err)
         out = b"".join(batch.out)
         chunks = _feed_output(unit, run, err, out)
@@ -982,6 +985,13 @@ async def _marks_limit(core: _ACore, unit: _Unit) -> float | None:
     if core.flush is not None or unit.marks.phase is Phase.SKIPPING:
         return await _marking(core, unit)
     return TICK
+
+
+def _note_data(run: _ARun) -> None:
+    """Tell a pending resume check that data arrived."""
+    check = run.pending()
+    if check is not None:
+        check.received()
 
 
 async def _quiet(core: _ACore, unit: _AUnit, run: _ARun, waited: float) -> bool:
