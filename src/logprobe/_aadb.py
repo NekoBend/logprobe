@@ -36,6 +36,7 @@ from logprobe._adb import (
     ShellEvent,
     ShellResult,
     ShellV2Decoder,
+    check_output,
     check_shell_v2,
     check_token,
     collect_events,
@@ -48,7 +49,6 @@ from logprobe._adb import (
     failure,
     features_request,
     numeric_addrinfo,
-    output_too_long,
     parse_features,
     server_closed,
     server_timeout,
@@ -211,20 +211,23 @@ async def ahost_query(
     """Send one ``host:`` request and return its length-prefixed reply.
 
     ``timeout`` limits the connection attempt, and then once more the whole
-    exchange after it (each step is also limited by it on its own), as in
-    `host_query`.
+    exchange after it; each step here is also limited by it on its own.
+    (`host_query` gives every step the time left of the one exchange limit.)
 
     Raises:
         LogprobeError: ``adb_error`` when the exchange does not finish within
             ``timeout`` seconds after connecting.
     """
     connection = await _connect(address, timeout)
+    scope = asyncio.timeout(timeout)
     try:
-        async with asyncio.timeout(timeout):
+        async with scope:
             await _request(connection, payload, serial, timeout)
             size = decode_length(await _receive(connection[0], 4, timeout))
             return await _receive(connection[0], size, timeout)
     except TimeoutError as error:
+        if not scope.expired():
+            raise
         raise server_timeout() from error
     finally:
         _drop(connection[1])
@@ -331,8 +334,10 @@ class AsyncShellStream:
 
         Raises:
             LogprobeError: ``adb_error`` if the device sent an empty exit
-                packet. Output received before it is returned first, the
-                stream is closed, and later reads return None.
+                packet or a packet that declares more than
+                ``MAX_SHELL_PACKET`` bytes. Output received before it is
+                returned first, the stream is closed, and later reads return
+                None.
             Cancelled: The callback set with :meth:`set_cancelled` returned
                 true before a network read; the stream is closed.
         """
@@ -505,15 +510,16 @@ async def arun_shell(
                 opened = stream
                 while (event := await stream.read()) is not None:
                     (out if event[0] == "stdout" else err).extend(event[1])
-                    if max_output is not None and len(out) + len(err) > max_output:
-                        raise output_too_long(args, max_output)
+                    check_output(args, out, err, max_output)
     except TimeoutError:
         if not scope.expired():
             raise
         if opened is not None:
             err += opened.held_stderr()
+        check_output(args, out, err, max_output)
         msg = f"command did not finish within {timeout} seconds"
         raise CommandTimeoutError(msg, bytes(err)) from None
     if stream.exit_status is None:  # the connection ended inside a packet
         err += stream.held_stderr()
+        check_output(args, out, err, max_output)
     return ShellResult(stream.exit_status, bytes(out), bytes(err))

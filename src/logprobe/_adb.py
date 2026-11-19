@@ -53,7 +53,8 @@ MAX_SHELL_PACKET = 16 * 1024 * 1024
 # The most output (stdout and stderr together) that a command logprobe runs
 # itself may produce: the package lists, getprop, date and the markers. The
 # largest such output seen was `dumpsys package packages`: about 0.95 MB for
-# 254 packages on an API 36 emulator.
+# 254 packages on an API 36 emulator. It is checked per whole packet, so the
+# reader may hold up to one more packet (``MAX_SHELL_PACKET``) meanwhile.
 COMMAND_OUTPUT_LIMIT = 64 * 1024 * 1024
 
 type ShellEvent = tuple[Literal["stdout", "stderr"], bytes]
@@ -1192,8 +1193,9 @@ class ShellV2Decoder:
         unless the exit packet was completed by ``data``.
 
         Raises:
-            LogprobeError: ``adb_error`` for an empty exit packet or for bytes
-                after the exit packet.
+            LogprobeError: ``adb_error`` for an empty exit packet, for bytes
+                after the exit packet, or for a packet that declares more than
+                ``MAX_SHELL_PACKET`` bytes.
         """
         pieces, status, error = self.feed_pieces(data)
         if error is not None:
@@ -1322,8 +1324,9 @@ class ShellStream:
         Raises:
             TimeoutError: If a timeout or deadline was set and expired.
             LogprobeError: ``adb_error`` if the device sent an empty exit
-                packet. Output received before it is returned first. Bytes
-                after the exit packet are ignored.
+                packet or a packet that declares more than
+                ``MAX_SHELL_PACKET`` bytes. Output received before it is
+                returned first. Bytes after the exit packet are ignored.
             Cancelled: If ``cancelled()`` returned true; the stream is closed
                 (by this thread, which owns the socket) before it is raised.
         """
@@ -1513,16 +1516,31 @@ def run_shell(
             stream.set_deadline(deadline)
             while (event := stream.read(cancelled)) is not None:
                 (out if event[0] == "stdout" else err).extend(event[1])
-                if max_output is not None and len(out) + len(err) > max_output:
-                    raise output_too_long(args, max_output)
+                check_output(args, out, err, max_output)
     except TimeoutError:
         if opened is not None:
             err += opened.held_stderr()
+        check_output(args, out, err, max_output)
         msg = f"command did not finish within {timeout} seconds"
         raise CommandTimeoutError(msg, bytes(err)) from None
     if stream.exit_status is None:  # the connection ended inside a packet
         err += stream.held_stderr()
+        check_output(args, out, err, max_output)
     return ShellResult(stream.exit_status, bytes(out), bytes(err))
+
+
+def check_output(
+    args: Sequence[str], out: bytearray, err: bytearray, limit: int | None
+) -> None:
+    """Raise `output_too_long` when ``out`` and ``err`` together pass ``limit``.
+
+    It runs after every whole packet and after the held part of a cut stderr
+    packet is added, so the output kept is never over the limit; what the
+    reader holds of an unfinished packet meanwhile is bounded by
+    ``MAX_SHELL_PACKET``.
+    """
+    if limit is not None and len(out) + len(err) > limit:
+        raise output_too_long(args, limit)
 
 
 def output_too_long(args: Sequence[str], limit: int) -> LogprobeError:

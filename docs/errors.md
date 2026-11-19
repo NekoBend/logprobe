@@ -146,8 +146,10 @@ Raised when the adb server answered in a way logprobe cannot use:
   length, a broken shell packet, or a shell packet that declares more than
   16 MiB.
 - A command that logprobe runs itself (the package list, `getprop`, `date`,
-  the flush marker) wrote more than 64 MiB of output. `Device.shell()` has no
-  such limit.
+  the start marker) wrote more than 64 MiB of output. `Device.shell()` has no
+  such limit. A flush marker command that fails this way raises nothing: it
+  counts as not having run, as when the connection is lost (see
+  [streams.md](streams.md)).
 - Sending to or receiving from the server failed, the server closed the
   connection in the middle of a reply, or the server did not answer within
   10 seconds. For a query to the server itself (the device list, a device's
