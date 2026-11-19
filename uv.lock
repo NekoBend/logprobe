@@ -22,7 +22,7 @@ wheels = [
 
 [[package]]
 name = "logprobe"
-version = "0.1.0a1.dev0"
+version = "0.1.0a1"
 source = { editable = "." }
 
 [package.dev-dependencies]
