@@ -159,6 +159,7 @@ __all__ = [
     "ResumeCheck",
     "Segment",
     "chatty_loss",
+    "has_zone",
     "new_marker",
 ]
 
@@ -183,6 +184,17 @@ _MARKER = re.compile(r"(?:start|flush)-[0-9a-f]{32}")
 # notice logd wrote: the line is an ordinary entry (filtered, and dropped as a
 # replay, like any other).
 _EXPIRE = re.compile(r"uid=\d+(?:\([^)]*\))?(?: .*)? expire (\d{1,18}) lines?")
+
+
+def has_zone(moment: datetime) -> bool:
+    """True when ``moment`` has a zone (is aware).
+
+    logcat prints the zone (``-v zone``) on every line, so a line without one
+    comes from a broken producer. The feeder's cursor moves only on times with
+    a zone, and the resume check treats a line without one as a line without a
+    time, so no aware time is ever compared with a naive one.
+    """
+    return moment.utcoffset() is not None
 
 
 def chatty_loss(message: str) -> int | None:
@@ -598,11 +610,11 @@ class Feeder:
                 unparsed += 1
             else:
                 moment = entry.logged_at
-                try:
-                    if cursor is None or moment > cursor:
-                        cursor = moment
-                except TypeError:  # naive and aware times mixed: keep the first kind
-                    pass
+                # Only a time with a zone moves the cursor: a resume needs one
+                # (logcat -T), and logcat prints the zone on every line, so a
+                # line without one comes from a broken producer.
+                if has_zone(moment) and (cursor is None or moment > cursor):
+                    cursor = moment
                 tag = entry.tag
                 if tag == MARKER_TAG:
                     token = entry.message.rstrip()

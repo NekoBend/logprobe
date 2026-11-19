@@ -1037,22 +1037,28 @@ def test_data_that_completes_no_line_still_counts_as_data_for_the_check(
 
 
 class _EmptyReads(_ScriptedStream):
-    """Like `_ScriptedStream`, with ``b""`` for a network read that brought bytes
-    but no output (an empty packet, or a packet header alone): the wait runs
-    out with nothing decoded, but ``received_at`` moves."""
+    """Like `_ScriptedStream`, with a network read that brought bytes but no
+    output (an empty packet, or a packet header alone): the 0.6 s wait runs out
+    with nothing decoded, but ``received_at`` moves. ``LATE`` bytes came at the
+    end of the wait, ``EARLY`` ones at its start (the rest was silence)."""
 
     async def read_part(self) -> tuple[str, bytes] | None:
-        if self._chunks and self._chunks[0] == b"":
-            self._chunks.pop(0)
+        if self._chunks and self._chunks[0] in (LATE, EARLY):
+            when = self._chunks.pop(0)
+            start = self._clock.now
             self._clock.now += 0.6
-            self.received_at += 1.0
+            self.received_at = self._clock.now if when is LATE else start
             raise TimeoutError
         return await super().read_part()
 
 
-def test_bytes_that_complete_no_output_still_count_as_data_for_the_check(
-    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
-) -> None:
+LATE = b"late"
+EARLY = b"early"
+
+
+def resume_with(
+    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch, *script: bytes | None
+) -> tuple[_astream._AUnit, _astream._ARun, _astream._ACore]:
     (device,) = attach(server, "a")
     unit = _astream._AUnit(device, None, 0.0)
     unit.feeder.feed(at(10, "A"))
@@ -1060,17 +1066,45 @@ def test_bytes_that_complete_no_output_still_count_as_data_for_the_check(
     unit.feeder.begin_connection(plan.check)
     clock = _Clock()
     monkeypatch.setattr(_astream, "monotonic", clock)
-    # 2.4 s of reads that bring bytes but no output, then the replayed line:
-    # never one second (the idle time of a check) without data.
-    stream = _EmptyReads(clock, b"", b"", b"", b"", at(10, "A"), None)
+    monkeypatch.setattr(_astream, "perf_counter", clock)
+    stream = _EmptyReads(clock, *script)
     run_ = _astream._ARun(stream, "a", plan.check)  # ty: ignore[invalid-argument-type]
     core = _astream._ACore([unit], _astream.AsyncOutbox(10, 1 << 20))
+    return unit, run_, core
+
+
+def test_bytes_that_complete_no_output_still_count_as_data_for_the_check(
+    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 0.6 s of silence, bytes that complete no output, 0.6 s of silence, the
+    # replayed line: never one second (the idle time of a check) without data.
+    unit, run_, core = resume_with(
+        server, monkeypatch, None, LATE, None, at(10, "A"), None
+    )
 
     async def scenario() -> None:
         await _astream._read(core, unit, run_)
         assert await core.outbox.take(0) is None  # no gap, no line: A was a replay
         assert unit.feeder.duplicates == 1
         assert run_.pending() is not None  # the check still waits for a new line
+
+    run(scenario)
+
+
+def test_the_silence_after_bytes_that_complete_no_output_counts_as_idle(
+    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Bytes at the start of a wait, then 0.6 s and another 0.6 s of silence:
+    # more than one second without data ends the check, as on the blocking
+    # stream, so the late line is new.
+    unit, run_, core = resume_with(server, monkeypatch, EARLY, None, at(10, "A"))
+
+    async def scenario() -> None:
+        await _astream._read(core, unit, run_)
+        taken = await core.outbox.take(0)
+        assert taken is not None
+        assert isinstance(taken[0], Gap)
+        assert taken[0].reason == "ring_rotated"
 
     run(scenario)
 
