@@ -36,6 +36,11 @@ in memory. A full log buffer can hold hundreds of thousands of lines, so pass
   the last 1,000 records, not the last 1,000 warnings. A record whose message
   has several lines gives one entry per line, so the list can hold more than
   N entries.
+- Known limitation: logprobe does not enforce `tail` itself. It keeps the
+  matching entries in memory until logcat exits, so an adb server or device
+  that ignores `-t`, or never ends its output, can make the list and the time
+  the dump takes grow without limit. There is no overall deadline: once logcat
+  is running, a read that waits 30 seconds for any byte raises `TimeoutError`.
 - `where` and the shortcuts are those of a stream; see
   [conditions.md](conditions.md).
 - A snapshot returns no gaps and no summary; it logs the gaps it finds (a
@@ -669,4 +674,5 @@ lines a second, each cut to 1,024 bytes).
   read that device. An older logd may skip lines then, and `detect_skips` does
   not see it.
 - The threading rules of the blocking stream are verified on CPython with the
-  global interpreter lock. The free-threaded build is not verified.
+  global interpreter lock. The free-threaded build has had only a one-off
+  check; see [Requirements](../README.md#requirements).
