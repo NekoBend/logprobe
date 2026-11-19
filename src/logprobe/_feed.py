@@ -176,15 +176,21 @@ MARKER_TAG: Final = "logprobe"
 CHATTY_TAG: Final = "chatty"
 
 _MARKER = re.compile(r"(?:start|flush)-[0-9a-f]{32}")
-_EXPIRE = re.compile(r"uid=\d+(?:\([^)]*\))?(?: .*)? expire (\d+) lines?")
+# The count has at most 18 digits: far more lines than any log buffer holds,
+# and short enough that int() never refuses it (Python limits conversions to
+# 4,300 digits by default). After n notices the lost total is below n * 10**18,
+# so it stays far below that limit in any real run. A longer number is not a
+# notice logd wrote: the line is an ordinary entry (filtered, and dropped as a
+# replay, like any other).
+_EXPIRE = re.compile(r"uid=\d+(?:\([^)]*\))?(?: .*)? expire (\d{1,18}) lines?")
 
 
 def chatty_loss(message: str) -> int | None:
     """The number of lines a ``chatty`` notice says were dropped, or None.
 
     Only ``expire`` notices count (``uid=1000(system) expire 3 lines``); an
-    ``identical`` notice and any other message give None. Trailing whitespace
-    is ignored.
+    ``identical`` notice, a count of more than 18 digits and any other message
+    give None. Trailing whitespace is ignored.
     """
     found = _EXPIRE.fullmatch(message.rstrip())
     return None if found is None else int(found[1])
