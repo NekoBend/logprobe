@@ -177,23 +177,32 @@ def real_sigint() -> Generator[None]:
         signal.signal(signal.SIGINT, previous)
 
 
-def interrupt_main_soon(delay: float = 0.05) -> None:
-    """Send Ctrl-C to the main thread from another thread ``delay`` seconds later.
+def interrupt_main_when(ready: threading.Event) -> threading.Thread:
+    """Send Ctrl-C to the main thread from another thread once ``ready`` is set.
 
-    The delay lets the main thread get past ``Thread.start()`` and into the wait
-    under test first. ``Thread.start()`` waits in a ``threading.Condition``; an
-    interrupt that lands while that wait has let go of its lock and not yet
-    taken it back makes the ``with`` block raise ``RuntimeError: release
-    unlocked lock`` instead of KeyboardInterrupt. Without the GIL the sending
-    thread runs at the same time as the main thread, so the interrupt can land
-    there.
+    The main thread sets ``ready`` after this returns, just before the wait under
+    test, so the interrupt never lands while the main thread is still in this
+    call's ``Thread.start()``. That waits in a ``threading.Condition``, and an
+    interrupt that lands after the wait let go of its lock but before the
+    ``finally`` that takes it back is running makes the ``with`` block raise
+    ``RuntimeError: release unlocked lock`` instead of KeyboardInterrupt.
+    Without the GIL the sending thread runs at the same time as the main
+    thread, so the interrupt can land there. The short pause after ``ready``
+    gives the main thread time to start waiting (best effort). Nothing is sent
+    if ``ready`` is not set within ``GUARD`` seconds.
+
+    Returns:
+        The sending thread, for the test to join.
     """
 
     def send() -> None:
-        time.sleep(delay)
-        _thread.interrupt_main()
+        if ready.wait(GUARD):
+            time.sleep(0.01)
+            _thread.interrupt_main()
 
-    threading.Thread(target=send, daemon=True).start()
+    sender = threading.Thread(target=send, daemon=True)
+    sender.start()
+    return sender
 
 
 # --- arguments ---------------------------------------------------------------
@@ -1570,16 +1579,31 @@ def test_lifecycle_ctrl_c_while_iterating_leaves_the_with_block_quickly(
 ) -> None:
     (device,) = attach(server, "a")
     server.add_sequence("logcat", hold("a", lines(0, 1)))
+    waiting = threading.Event()
     with real_sigint():
         began = 0.0
         with pytest.raises(KeyboardInterrupt), device.stream() as s:  # noqa: PT012
             it = iter(s)
             assert next(it).message == "m0"
+            outbox = s._core.outbox
+            real_take = outbox.take
+
+            def take_once_ready(
+                timeout: float | None = None,
+            ) -> Sequence[object] | None:
+                # The second fetch: Ctrl-C comes while it waits for a chunk.
+                outbox.take = real_take
+                waiting.set()
+                return real_take(timeout)
+
+            outbox.take = take_once_ready
+            sender = interrupt_main_when(waiting)
             began = time.monotonic()
-            interrupt_main_soon()
             for _ in it:  # waits for more; the interrupt arrives meanwhile
                 pass
         assert time.monotonic() - began < CTRL_C
+    assert waiting.is_set()
+    sender.join(GUARD)
     assert s._core.outbox.killed
     wait_threads_gone()
     assert server.wait_idle(GUARD)
@@ -1603,14 +1627,17 @@ def test_lifecycle_ctrl_c_with_a_stuck_callback_does_not_wait_for_it(
         began = 0.0
         with pytest.raises(KeyboardInterrupt), device.stream(on_entry=on_entry):  # noqa: PT012
             assert inside.wait(GUARD)
+            go = threading.Event()
+            sender = interrupt_main_when(go)
             began = time.monotonic()
-            interrupt_main_soon()
-            # Short sleeps: the interrupt is seen whenever it arrives. (Not an
-            # Event wait, which would wait in a Condition; see
-            # interrupt_main_soon.)
+            go.set()
+            # Short sleeps give the main thread frequent chances to handle the
+            # interrupt. (Not Event.wait slices, which wait in a Condition; see
+            # interrupt_main_when.)
             for _ in range(int(GUARD / 0.01)):
                 time.sleep(0.01)
         assert time.monotonic() - began < CTRL_C
+    sender.join(GUARD)
     # The readers ended and their sockets are closed; the consumer thread
     # stays until the callback returns, and then calls nothing more.
     wait_until(lambda: [t.name for t in stream_threads()] == ["logprobe-consumer"])
