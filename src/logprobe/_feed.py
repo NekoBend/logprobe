@@ -39,10 +39,10 @@ the new connection's bytes.
 Cursor and history
 ------------------
 
-``cursor`` is the newest timestamp among the lines read, including lines the
-condition removed and marker lines; lines without a timestamp (dividers,
-unparsed lines) do not count. Lines a resume check drops as replays are not
-read at all.
+``cursor`` is the newest timestamp with a zone among the lines read, including
+lines the condition removed and marker lines; lines without a timestamp
+(dividers, unparsed lines) and lines whose timestamp has no zone do not count.
+Lines a resume check drops as replays are not read at all.
 
 For every read the feeder keeps one history group: the lines the read ended
 (the `FramedLine` objects the framer already made), the cursor at the end of
@@ -159,6 +159,7 @@ __all__ = [
     "ResumeCheck",
     "Segment",
     "chatty_loss",
+    "has_zone",
     "new_marker",
 ]
 
@@ -183,6 +184,17 @@ _MARKER = re.compile(r"(?:start|flush)-[0-9a-f]{32}")
 # notice logd wrote: the line is an ordinary entry (filtered, and dropped as a
 # replay, like any other).
 _EXPIRE = re.compile(r"uid=\d+(?:\([^)]*\))?(?: .*)? expire (\d{1,18}) lines?")
+
+
+def has_zone(moment: datetime) -> bool:
+    """True when ``moment`` has a zone (is aware).
+
+    logcat prints the zone (``-v zone``) on every line, so a line without one
+    comes from a broken producer. The feeder's cursor moves only on times with
+    a zone, and the resume check treats a line without one as a line without a
+    time, so no aware time is ever compared with a naive one.
+    """
+    return moment.utcoffset() is not None
 
 
 def chatty_loss(message: str) -> int | None:
@@ -398,7 +410,8 @@ class Feeder:
 
     @property
     def cursor(self) -> datetime | None:
-        """The newest timestamp read so far (see the module docs), or None."""
+        """The newest timestamp with a zone read so far (see the module docs),
+        or None."""
         return self._cursor
 
     @property
@@ -598,11 +611,11 @@ class Feeder:
                 unparsed += 1
             else:
                 moment = entry.logged_at
-                try:
-                    if cursor is None or moment > cursor:
-                        cursor = moment
-                except TypeError:  # naive and aware times mixed: keep the first kind
-                    pass
+                # Only a time with a zone moves the cursor: a resume needs one
+                # (logcat -T), and logcat prints the zone on every line, so a
+                # line without one comes from a broken producer.
+                if has_zone(moment) and (cursor is None or moment > cursor):
+                    cursor = moment
                 tag = entry.tag
                 if tag == MARKER_TAG:
                     token = entry.message.rstrip()

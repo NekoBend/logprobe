@@ -85,9 +85,10 @@ not report:
 - Lines that an older logd skipped without a notice while the reader was slow:
   all of them without ``detect_skips``; with it, those skipped before the
   reader had waited `STALL_AFTER` seconds for room in its queue.
-- Lines that do not parse: they are neither matched nor checked. A replayed one
-  is delivered twice without a gap, and one that does not come back goes
-  unnoticed.
+- Lines that do not parse, and lines whose time has no zone (which logcat with
+  ``-v zone`` does not print): they are neither matched nor checked. A
+  replayed one is delivered twice without a gap, and one that does not come
+  back goes unnoticed.
 
 It may report too much:
 
@@ -113,7 +114,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 from ._errors import LogprobeError
-from ._feed import OVERLAP
+from ._feed import OVERLAP, has_zone
 from ._framing import decode_line
 from ._parse import ParseContext, ThreadTimeLogParser
 from ._records import Gap
@@ -590,12 +591,13 @@ class ResumeCheck:
 
         A line without a time (a divider, or one that did not parse) is never
         matched and never marks an older unread line, but once every expected
-        line has come back it ends the check like any other new line.
+        line has come back it ends the check like any other new line. A line
+        whose time has no zone counts as a line without a time (`has_zone`).
         """
         self._idle = 0.0
         if self._finished:
             return True
-        if logged_at is not None:
+        if logged_at is not None and has_zone(logged_at):
             data = line.data
             count = self._expected.get(data, 0)
             if count:
@@ -727,7 +729,7 @@ def plan_resume(
     for framed in feeder.history_since(start):
         text = decode_line(framed.data, cut=framed.truncated)
         entry = parser.parse(text, ctx)
-        if entry is None:
+        if entry is None or not has_zone(entry.logged_at):
             continue
         bucket = expected if entry.logged_at >= start else older
         bucket[framed.data] = bucket.get(framed.data, 0) + 1
