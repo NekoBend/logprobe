@@ -211,15 +211,16 @@ def interrupt_main_when(ready: Callable[[], bool]) -> Generator[None]:
         yield
     finally:
         # A Ctrl-C sent just before the cancel can still arrive here, once; it
-        # must neither replace the test's own outcome nor skip the join.
-        for _ in range(2):
-            try:
-                with sending:
-                    cancel.set()
-                sender.join(GUARD)
-                break
-            except KeyboardInterrupt:
-                pass
+        # should neither replace the test's own outcome nor skip the join (best
+        # effort: an asynchronous exception can land between any two steps).
+        try:
+            with sending:
+                cancel.set()
+            sender.join(GUARD)
+        except KeyboardInterrupt:
+            with sending:
+                cancel.set()
+            sender.join(GUARD)
         assert not sender.is_alive(), "the Ctrl-C sender did not end"
 
 
