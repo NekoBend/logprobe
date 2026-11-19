@@ -480,11 +480,14 @@ def test_windows_lookup_skips_entries_relative_to_the_current_drive(
     sub = cwd / "bin"
     sub.mkdir()
     (sub / "adb.exe").write_bytes(b"")
-    # The drive-relative forms need a drive letter, not a UNC share.
-    assert len(cwd.drive) == 2, cwd.drive
-    assert cwd.drive.endswith(":"), cwd.drive
-    rooted = "\\" + str(cwd)[len(cwd.drive) :].lstrip("\\")  # the current drive's root
-    for entry in (".\\", ".\\bin", rooted, cwd.drive + "bin", f'"{cwd.drive}bin"'):
+    entries = [".\\", ".\\bin"]
+    roots = ["sdk", ".\\sdk"]
+    # The rooted and drive-relative forms need a drive letter, not a UNC share.
+    if len(cwd.drive) == 2 and cwd.drive.endswith(":"):
+        rooted = "\\" + str(cwd)[len(cwd.drive) :].lstrip("\\")  # the drive's root
+        entries += [rooted, cwd.drive + "bin", f'"{cwd.drive}bin"']
+        roots += [rooted + "\\sdk", cwd.drive + "sdk"]
+    for entry in entries:
         monkeypatch.setenv("PATH", entry)
         assert _adb._which("adb") is None, entry
     monkeypatch.setenv("PATH", f'"{windows_lookup["path"]}"')
@@ -495,7 +498,7 @@ def test_windows_lookup_skips_entries_relative_to_the_current_drive(
     monkeypatch.setenv("PATH", str(cwd.parent / "nowhere"))
     monkeypatch.delenv("LOGPROBE_ADB", raising=False)
     monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
-    for root in (rooted + "\\sdk", cwd.drive + "sdk"):
+    for root in roots:
         monkeypatch.setenv("ANDROID_HOME", root)
         assert _adb.find_adb() is None, root
 
