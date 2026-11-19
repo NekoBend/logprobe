@@ -39,10 +39,10 @@ the new connection's bytes.
 Cursor and history
 ------------------
 
-``cursor`` is the newest timestamp among the lines read, including lines the
-condition removed and marker lines; lines without a timestamp (dividers,
-unparsed lines) do not count. Lines a resume check drops as replays are not
-read at all.
+``cursor`` is the newest timestamp with a zone among the lines read, including
+lines the condition removed and marker lines; lines without a timestamp
+(dividers, unparsed lines) and lines whose timestamp has no zone do not count.
+Lines a resume check drops as replays are not read at all.
 
 For every read the feeder keeps one history group: the lines the read ended
 (the `FramedLine` objects the framer already made), the cursor at the end of
@@ -410,7 +410,8 @@ class Feeder:
 
     @property
     def cursor(self) -> datetime | None:
-        """The newest timestamp read so far (see the module docs), or None."""
+        """The newest timestamp with a zone read so far (see the module docs),
+        or None."""
         return self._cursor
 
     @property

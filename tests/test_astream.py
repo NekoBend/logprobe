@@ -1038,15 +1038,16 @@ def test_data_that_completes_no_line_still_counts_as_data_for_the_check(
 
 class _EmptyReads(_ScriptedStream):
     """Like `_ScriptedStream`, with a network read that brought bytes but no
-    output (an empty packet, or a packet header alone): the 0.6 s wait runs out
-    with nothing decoded, but ``received_at`` moves. ``LATE`` bytes came at the
-    end of the wait, ``EARLY`` ones at its start (the rest was silence)."""
+    output (an empty packet, or a packet header alone): the wait runs out with
+    nothing decoded, but ``received_at`` moves. ``LATE`` bytes came at the end
+    of a 0.2 s wait, ``EARLY`` ones at the start of a 0.6 s wait (the rest of
+    it was silence)."""
 
     async def read_part(self) -> tuple[str, bytes] | None:
         if self._chunks and self._chunks[0] in (LATE, EARLY):
             when = self._chunks.pop(0)
             start = self._clock.now
-            self._clock.now += 0.6
+            self._clock.now += 0.2 if when is LATE else 0.6
             self.received_at = self._clock.now if when is LATE else start
             raise TimeoutError
         return await super().read_part()
@@ -1076,8 +1077,9 @@ def resume_with(
 def test_bytes_that_complete_no_output_still_count_as_data_for_the_check(
     server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # 0.6 s of silence, bytes that complete no output, 0.6 s of silence, the
-    # replayed line: never one second (the idle time of a check) without data.
+    # 0.8 s of silence, then bytes that complete no output, 0.6 s of silence,
+    # the replayed line: never one second (the idle time of a check) without
+    # data, but 1.4 s in all, which the old reader counted as silence.
     unit, run_, core = resume_with(
         server, monkeypatch, None, LATE, None, at(10, "A"), None
     )
@@ -1087,6 +1089,29 @@ def test_bytes_that_complete_no_output_still_count_as_data_for_the_check(
         assert await core.outbox.take(0) is None  # no gap, no line: A was a replay
         assert unit.feeder.duplicates == 1
         assert run_.pending() is not None  # the check still waits for a new line
+
+    run(scenario)
+
+
+def test_time_other_tasks_take_after_a_read_is_not_idle_time(
+    server: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Bytes at the end of a wait, then 0.6 s of silence; each time the reader
+    # yields, other tasks take 0.9 s. Only the 0.6 s counts: no gap.
+    unit, run_, core = resume_with(server, monkeypatch, LATE, None, at(10, "A"))
+    clock = run_.stream._clock  # ty: ignore[missing-attribute]
+    real_sleep = asyncio.sleep
+
+    async def busy_others(delay: float) -> None:
+        clock.now += 0.9
+        await real_sleep(delay)
+
+    async def scenario() -> None:
+        monkeypatch.setattr(_astream.asyncio, "sleep", busy_others)
+        await _astream._read(core, unit, run_)
+        monkeypatch.setattr(_astream.asyncio, "sleep", real_sleep)
+        assert await core.outbox.take(0) is None  # no gap, no line: A was a replay
+        assert unit.feeder.duplicates == 1
 
     run(scenario)
 
