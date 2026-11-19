@@ -142,10 +142,23 @@ def test_parse_skips_blank_and_serial_only_lines() -> None:
     assert _adb.parse_devices("\n   \nlonely\n") == []
 
 
-def test_parse_skips_a_serial_with_a_nul_character() -> None:
-    # Such a serial could not be put into a request; the other lines still count.
-    text = "a\0b device product:x\nemulator-5554 device\n"
-    assert _adb.parse_devices(text) == [_adb.DeviceInfo("emulator-5554", "device")]
+def test_parse_skips_a_serial_that_no_request_can_carry() -> None:
+    # A NUL character, bytes that were not UTF-8 (decoded as U+FFFD) and a
+    # serial too long for the features request; the other lines still count.
+    longest = "s" * (0xFFFF - len("host-serial::features"))
+    text = (
+        "a\0b device product:x\n"
+        "bad\ufffdname device\n"
+        f"{longest}x device\n"
+        f"{longest} device\n"
+        "emulator-5554 device\n"
+    )
+    assert _adb.parse_devices(text) == [
+        _adb.DeviceInfo(longest, "device"),
+        _adb.DeviceInfo("emulator-5554", "device"),
+    ]
+    # The longest kept serial still fits the request.
+    _adb.encode_request(_adb.features_request(longest))
 
 
 def test_device_info_is_frozen() -> None:

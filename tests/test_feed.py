@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from logprobe import Anr, Crash, Gap, Level, Package, Tag
+from logprobe import Anr, Crash, DeviceSummary, Gap, Level, Package, Tag
 from logprobe._feed import (
     CHATTY_TAG,
     CHUNK_ENTRIES,
@@ -950,10 +950,13 @@ class TestChattyNotice:
         assert chatty_loss(f"uid=10014 expire {'9' * 18} lines") == int("9" * 18)
         assert chatty_loss(f"uid=10014 expire {'9' * 19} lines") is None
         # Beyond int()'s default limit of 4,300 digits: the line is delivered as
-        # an entry, the feed goes on, and no gap is counted.
+        # an ordinary entry, the next line follows, and no gap is counted.
+        message = f"uid=10014 expire {'1' * 4301} lines"
         feeder = Feeder("s1")
-        out = feeder.feed(data(notice(text=f"uid=10014 expire {'1' * 4301} lines")))
-        assert shape(out) == [1]
+        out = feeder.feed(data(notice(text=message), line(2.0, "after")))
+        entries = [entry for segment in flat(out) for entry in segment]
+        assert [entry.message for entry in entries] == [message, "after"]
+        assert entries[0].tag == CHATTY_TAG
         assert (feeder.gaps, feeder.lost) == (0, 0)
 
     def test_the_total_of_the_counts_stays_serializable(self):
@@ -961,9 +964,36 @@ class TestChattyNotice:
         # which json.dumps (through int-to-str) refuses.
         feeder = Feeder("s1")
         big = notice(text=f"uid=10014 expire {'9' * 4300} lines")
-        feeder.feed(data(big, big))
-        json.dumps({"lost": feeder.lost})
+        out = feeder.feed(data(big, big))
         assert (feeder.gaps, feeder.lost) == (0, 0)
+        assert not [s for s in flat(out) if isinstance(s, Gap)]
+        when = datetime(2026, 1, 2, tzinfo=UTC)
+        summary = DeviceSummary(
+            serial="s1",
+            started_at=when,
+            ended_at=when,
+            lines=feeder.lines,
+            entries=feeder.entries,
+            unparsed=feeder.unparsed,
+            truncated=feeder.truncated,
+            gaps=feeder.gaps,
+            lost=feeder.lost,
+            reconnects=feeder.reconnects,
+            unattributed=0,
+            flush="not_requested",
+            error=None,
+        )
+        json.dumps(summary.to_dict())
+
+    def test_the_largest_accepted_counts_serialize(self):
+        feeder = Feeder("s1")
+        top = notice(text=f"uid=10014 expire {'9' * 18} lines")
+        out = feeder.feed(data(top, top))
+        gaps = [s for s in flat(out) if isinstance(s, Gap)]
+        assert [gap.lost for gap in gaps] == [int("9" * 18)] * 2
+        assert feeder.lost == 2 * int("9" * 18)
+        for gap in gaps:
+            json.dumps(gap.to_dict())
 
     def test_the_count_ignores_trailing_blanks_and_one_line_wording(self):
         assert chatty_loss("uid=1000(system) expire 1 line ") == 1

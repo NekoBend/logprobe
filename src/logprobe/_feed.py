@@ -178,8 +178,10 @@ CHATTY_TAG: Final = "chatty"
 _MARKER = re.compile(r"(?:start|flush)-[0-9a-f]{32}")
 # The count has at most 18 digits: far more lines than any log buffer holds,
 # and short enough that int() never refuses it (Python limits conversions to
-# 4,300 digits by default) and that the totals of a long run stay small. A
-# longer number is not a notice logd wrote; the line is delivered as it is.
+# 4,300 digits by default). After n notices the lost total is below n * 10**18,
+# so it stays far below that limit in any real run. A longer number is not a
+# notice logd wrote: the line is an ordinary entry (filtered, and dropped as a
+# replay, like any other).
 _EXPIRE = re.compile(r"uid=\d+(?:\([^)]*\))?(?: .*)? expire (\d{1,18}) lines?")
 
 

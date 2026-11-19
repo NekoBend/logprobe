@@ -911,6 +911,19 @@ _PROPERTY = re.compile(r"[a-z_]+:\S+")
 _NO_SERIAL = "(no serial number)"
 
 
+def _usable_serial(serial: str) -> bool:
+    """True when ``serial`` from a device list can be used in a request.
+
+    Not: a NUL character, which the request check refuses; U+FFFD, which stands
+    for bytes that were not UTF-8 and so differ from what the server listed; or
+    a length that makes the longest request with it exceed the request limit.
+    (Line breaks cannot occur: the reply is split into lines first.)
+    """
+    if "\0" in serial or "\ufffd" in serial:
+        return False
+    return len(features_request(serial).encode()) <= _MAX_PAYLOAD
+
+
 def parse_devices(text: str) -> list[DeviceInfo]:
     """Parse the output of ``host:devices-l``.
 
@@ -920,8 +933,8 @@ def parse_devices(text: str) -> list[DeviceInfo]:
     whatever lies between, which may contain spaces, as in ``no permissions
     (user in plugdev group; ...); see [http://...]``. Properties other than
     ``model``, ``product``, ``device`` and ``transport_id`` are dropped.
-    A line whose serial contains a NUL character is skipped: such a serial
-    could not be sent back to the server in a request.
+    A line whose serial could not be sent back to the server in a request is
+    skipped (`_usable_serial`).
     """
     result: list[DeviceInfo] = []
     for raw_line in text.splitlines():
@@ -931,7 +944,7 @@ def parse_devices(text: str) -> list[DeviceInfo]:
         else:
             serial, _, rest = line.partition(" ")
         tokens = rest.split()
-        if not serial or not tokens or "\0" in serial:
+        if not serial or not tokens or not _usable_serial(serial):
             continue
         fields: dict[str, str] = {}
         while len(tokens) > 1 and _PROPERTY.fullmatch(tokens[-1]):
