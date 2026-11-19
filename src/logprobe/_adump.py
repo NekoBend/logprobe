@@ -34,7 +34,11 @@ async def _take_list(address: _adb.ServerAddress, serial: str) -> ListJob:
         ran: ShellResult | TimeoutError
         try:
             ran = await _aadb.arun_shell(
-                address, serial, job.argv, _marks.COMMAND_LIMIT
+                address,
+                serial,
+                job.argv,
+                _marks.COMMAND_LIMIT,
+                max_output=_adb.COMMAND_OUTPUT_LIMIT,
             )
         except TimeoutError as error:
             ran = error

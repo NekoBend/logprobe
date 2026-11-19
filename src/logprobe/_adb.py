@@ -45,6 +45,12 @@ RECV_SIZE = 64 * 1024
 # seconds before the callback is asked again.
 TICK = 0.25
 _MAX_PAYLOAD = 0xFFFF
+# The largest shell protocol packet accepted from the adb server; a longer
+# declared length is a protocol error (see the module docs on limits).
+MAX_SHELL_PACKET = 16 * 1024 * 1024
+# The most output (stdout and stderr together) that a command logprobe runs
+# itself may produce: the package lists, getprop, date and the markers.
+COMMAND_OUTPUT_LIMIT = 64 * 1024 * 1024
 
 type ShellEvent = tuple[Literal["stdout", "stderr"], bytes]
 type ShellPiece = tuple[Literal["stdout", "stderr"], memoryview, bool]
@@ -866,15 +872,24 @@ def host_query(
 ) -> bytes:
     """Send one ``host:`` request and return its length-prefixed reply.
 
+    ``timeout`` limits the connection attempt, and then once more the whole
+    exchange after it: a reply that trickles in byte by byte cannot keep the
+    call waiting longer than that.
+
     Raises:
+        LogprobeError: ``adb_error`` when the exchange does not finish within
+            ``timeout`` seconds after connecting.
         Cancelled: If ``cancelled`` is given and returned true; the socket is
             closed before this is raised.
     """
     sock = connect(address, timeout, cancelled=cancelled)
     try:
-        _send_request(sock, payload, serial, None, cancelled, timeout)
-        size = _read_length(sock, None, cancelled, timeout)
-        return _recv_exact(sock, size, None, cancelled, timeout)
+        deadline = time.monotonic() + timeout
+        _send_request(sock, payload, serial, deadline, cancelled)
+        size = _read_length(sock, deadline, cancelled)
+        return _recv_exact(sock, size, deadline, cancelled)
+    except TimeoutError as error:
+        raise server_timeout() from error
     finally:
         sock.close()
 
@@ -1123,6 +1138,17 @@ class ShellV2Decoder:
                 if self._kind == _ID_EXIT and self._remaining == 0:
                     self._done = True
                     return pieces, None, protocol_error(_EMPTY_EXIT)
+                if self._remaining > MAX_SHELL_PACKET:
+                    self._done = True
+                    return (
+                        pieces,
+                        None,
+                        protocol_error(
+                            "the adb server sent a shell packet longer than "
+                            f"{MAX_SHELL_PACKET} bytes",
+                            length=self._remaining,
+                        ),
+                    )
                 continue
             take = min(self._remaining, size - pos)
             piece = view[pos : pos + take]
@@ -1448,6 +1474,7 @@ def run_shell(
     args: Sequence[str],
     timeout: float | None = 30.0,
     cancelled: Callable[[], bool] | None = None,
+    max_output: int | None = None,
 ) -> ShellResult:
     """Run a command on a device to completion and collect its output.
 
@@ -1458,14 +1485,15 @@ def run_shell(
 
     When the connection ends without an exit status, the stderr of the result
     ends with the received part of a stderr packet that was cut off; its
-    stdout holds only the packets that arrived whole.
+    stdout holds only the packets that arrived whole. ``max_output`` limits
+    stdout and stderr together, in bytes (None: no limit).
 
     Raises:
         TimeoutError: If everything did not finish within ``timeout`` seconds
             (a `CommandTimeoutError`, with the stderr received by then, the
             received part of an unfinished stderr packet included).
         LogprobeError: As :func:`open_shell`, or ``adb_error`` on a protocol
-            violation.
+            violation or when the output exceeds ``max_output``.
         Cancelled: If ``cancelled`` is given and returned true; the socket is
             closed before this is raised.
     """
@@ -1481,6 +1509,8 @@ def run_shell(
             stream.set_deadline(deadline)
             while (event := stream.read(cancelled)) is not None:
                 (out if event[0] == "stdout" else err).extend(event[1])
+                if max_output is not None and len(out) + len(err) > max_output:
+                    raise output_too_long(args, max_output)
     except TimeoutError:
         if opened is not None:
             err += opened.held_stderr()
@@ -1489,6 +1519,15 @@ def run_shell(
     if stream.exit_status is None:  # the connection ended inside a packet
         err += stream.held_stderr()
     return ShellResult(stream.exit_status, bytes(out), bytes(err))
+
+
+def output_too_long(args: Sequence[str], limit: int) -> LogprobeError:
+    """The error for a command whose output passed ``limit`` bytes."""
+    return protocol_error(
+        f"the command wrote more than {limit} bytes of output",
+        command=" ".join(args),
+        limit=limit,
+    )
 
 
 _LOGCAT_FORMAT_WORDS = ("threadtime", "year", "usec", "zone", "uid")

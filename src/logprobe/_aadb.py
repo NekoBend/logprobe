@@ -48,6 +48,7 @@ from logprobe._adb import (
     failure,
     features_request,
     numeric_addrinfo,
+    output_too_long,
     parse_features,
     server_closed,
     server_timeout,
@@ -173,7 +174,8 @@ async def _receive(reader: _Reader, size: int, limit: float | None) -> bytes:
     """Read exactly ``size`` bytes; ``limit`` applies to each receive.
 
     Like the blocking client, this is an idle limit: a reply that trickles in
-    keeps going as long as no single wait outlasts ``limit``.
+    keeps going as long as no single wait outlasts ``limit``. (`ahost_query`
+    puts one limit around the whole exchange as well.)
     """
     buffer = bytearray()
     while len(buffer) < size:
@@ -208,13 +210,22 @@ async def ahost_query(
 ) -> bytes:
     """Send one ``host:`` request and return its length-prefixed reply.
 
-    ``timeout`` limits each step (connecting, sending, each read) on its own.
+    ``timeout`` limits the connection attempt, and then once more the whole
+    exchange after it (each step is also limited by it on its own), as in
+    `host_query`.
+
+    Raises:
+        LogprobeError: ``adb_error`` when the exchange does not finish within
+            ``timeout`` seconds after connecting.
     """
     connection = await _connect(address, timeout)
     try:
-        await _request(connection, payload, serial, timeout)
-        size = decode_length(await _receive(connection[0], 4, timeout))
-        return await _receive(connection[0], size, timeout)
+        async with asyncio.timeout(timeout):
+            await _request(connection, payload, serial, timeout)
+            size = decode_length(await _receive(connection[0], 4, timeout))
+            return await _receive(connection[0], size, timeout)
+    except TimeoutError as error:
+        raise server_timeout() from error
     finally:
         _drop(connection[1])
 
@@ -462,6 +473,7 @@ async def arun_shell(
     serial: str,
     args: Sequence[str],
     timeout: float | None = 30.0,
+    max_output: int | None = None,
 ) -> ShellResult:
     """Run a command on a device to completion and collect its output.
 
@@ -472,14 +484,15 @@ async def arun_shell(
 
     When the connection ends without an exit status, the stderr of the result
     ends with the received part of a stderr packet that was cut off; its
-    stdout holds only the packets that arrived whole.
+    stdout holds only the packets that arrived whole. ``max_output`` limits
+    stdout and stderr together, in bytes (None: no limit).
 
     Raises:
         TimeoutError: If everything did not finish within ``timeout`` seconds
             (a `CommandTimeoutError`, with the stderr received by then, the
             received part of an unfinished stderr packet included).
         LogprobeError: As :func:`aopen_shell`, or ``adb_error`` on a protocol
-            violation.
+            violation or when the output exceeds ``max_output``.
     """
     out = bytearray()
     err = bytearray()
@@ -492,6 +505,8 @@ async def arun_shell(
                 opened = stream
                 while (event := await stream.read()) is not None:
                     (out if event[0] == "stdout" else err).extend(event[1])
+                    if max_output is not None and len(out) + len(err) > max_output:
+                        raise output_too_long(args, max_output)
     except TimeoutError:
         if not scope.expired():
             raise

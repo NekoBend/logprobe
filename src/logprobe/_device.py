@@ -212,7 +212,14 @@ class Device:
         returns true. ``TimeoutError`` is raised when the time is up. Read the
         output only when ``exit_status`` is 0.
         """
-        return _adb.run_shell(self._address, self.serial, args, timeout, cancelled)
+        return _adb.run_shell(
+            self._address,
+            self.serial,
+            args,
+            timeout,
+            cancelled,
+            max_output=_adb.COMMAND_OUTPUT_LIMIT,
+        )
 
     def shell(self, args: Sequence[str], timeout: float | None = 30.0) -> ShellResult:
         """Run a command on the device and return its exit status and output.
