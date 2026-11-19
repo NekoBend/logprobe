@@ -177,8 +177,23 @@ def real_sigint() -> Generator[None]:
         signal.signal(signal.SIGINT, previous)
 
 
-def interrupt_main_soon() -> None:
-    threading.Thread(target=_thread.interrupt_main, daemon=True).start()
+def interrupt_main_soon(delay: float = 0.05) -> None:
+    """Send Ctrl-C to the main thread from another thread ``delay`` seconds later.
+
+    The delay lets the main thread get past ``Thread.start()`` and into the wait
+    under test first. ``Thread.start()`` waits in a ``threading.Condition``; an
+    interrupt that lands while that wait has let go of its lock and not yet
+    taken it back makes the ``with`` block raise ``RuntimeError: release
+    unlocked lock`` instead of KeyboardInterrupt. Without the GIL the sending
+    thread runs at the same time as the main thread, so the interrupt can land
+    there.
+    """
+
+    def send() -> None:
+        time.sleep(delay)
+        _thread.interrupt_main()
+
+    threading.Thread(target=send, daemon=True).start()
 
 
 # --- arguments ---------------------------------------------------------------
@@ -1584,17 +1599,17 @@ def test_lifecycle_ctrl_c_with_a_stuck_callback_does_not_wait_for_it(
         inside.set()
         release.wait(GUARD)
 
-    blocker = threading.Event()
     with real_sigint():
         began = 0.0
         with pytest.raises(KeyboardInterrupt), device.stream(on_entry=on_entry):  # noqa: PT012
             assert inside.wait(GUARD)
             began = time.monotonic()
             interrupt_main_soon()
-            # Short slices: the interrupt is seen whenever it arrives.
+            # Short sleeps: the interrupt is seen whenever it arrives. (Not an
+            # Event wait, which would wait in a Condition; see
+            # interrupt_main_soon.)
             for _ in range(int(GUARD / 0.01)):
-                if blocker.wait(0.01):
-                    break
+                time.sleep(0.01)
         assert time.monotonic() - began < CTRL_C
     # The readers ended and their sockets are closed; the consumer thread
     # stays until the callback returns, and then calls nothing more.
