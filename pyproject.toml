@@ -1,6 +1,6 @@
 [project]
 name = "logprobe"
-version = "0.1.0a1.dev0"
+version = "0.1.0a1"
 description = "A fast, light Android logcat library for Python: read device logs live or as a snapshot, parse saved logcat files, filter entries and export them."
 readme = "README.md"
 license = "MIT"
