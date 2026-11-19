@@ -376,6 +376,54 @@ def test_windows_lookup_skips_empty_and_dot_entries(
     assert _adb._which("adb", windows=True) is None
 
 
+def test_windows_lookup_skips_every_relative_entry(
+    windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each of these would resolve against the current directory, which holds an
+    # adb.exe directly and one in "bin".
+    sub = windows_lookup["cwd"] / "bin"
+    sub.mkdir()
+    (sub / "adb.exe").write_bytes(b"")
+    (sub / "adb.exe").chmod(0o755)
+    for entry in ("./", ".//", "bin", "./bin", "bin/..", "bin/../."):
+        monkeypatch.setenv("PATH", entry)
+        assert _adb._which("adb", windows=True) is None, entry
+    # An absolute entry after them is still searched.
+    path = os.pathsep.join(["./", "bin", str(windows_lookup["path"])])
+    monkeypatch.setenv("PATH", path)
+    found = _adb._which("adb", windows=True)
+    assert found is not None
+    assert Path(found).parent == windows_lookup["path"]
+
+
+def test_find_adb_on_a_windows_platform_skips_a_relative_sdk_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # shutil.which reads sys.platform on each call, so the lookups are recorded
+    # instead of run: the test is about which directories are tried.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.delenv("LOGPROBE_ADB", raising=False)
+    tried: list[str] = []
+
+    def record(command: str, **_: object) -> None:
+        tried.append(command)
+
+    monkeypatch.setattr(_adb, "_which", record)
+    root = tmp_path / "sdk"
+    for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
+        monkeypatch.delenv("ANDROID_HOME", raising=False)
+        monkeypatch.delenv("ANDROID_SDK_ROOT", raising=False)
+        for relative in ("sdk", ".", "./sdk"):
+            monkeypatch.setenv(variable, relative)
+            tried.clear()
+            assert _adb.find_adb() is None
+            assert tried == ["adb"], (variable, relative)
+        monkeypatch.setenv(variable, str(root))
+        tried.clear()
+        assert _adb.find_adb() is None
+        assert tried == ["adb", str(root / "platform-tools" / "adb.exe")]
+
+
 def test_windows_lookup_matches_pathext_case_insensitively(
     windows_lookup: dict[str, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

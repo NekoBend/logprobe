@@ -76,8 +76,12 @@ logprobe looks for the `adb` executable in this order:
 
 1. The `adb` argument of `devices()` or `Device(...)`.
 2. The environment variable `LOGPROBE_ADB`.
-3. `adb` on `PATH`. On Windows the current directory is not searched.
-4. `platform-tools/adb` under `ANDROID_HOME`, then under `ANDROID_SDK_ROOT`.
+3. `adb` on `PATH`. On Windows the current directory is not searched, and
+   neither is any relative `PATH` entry (such as `.\`, `./` or `bin`), since it
+   would be resolved against the current directory.
+4. `platform-tools/adb` under `ANDROID_HOME`, then under `ANDROID_SDK_ROOT`. On
+   Windows a variable that holds a relative path is skipped, for the same
+   reason.
 
 If the `adb` argument or `LOGPROBE_ADB` names something that is not an
 executable, logprobe does not fall back to another adb: the server is not

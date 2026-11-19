@@ -222,9 +222,11 @@ def _which(command: str, *, windows: bool | None = None) -> str | None:
 
     ``shutil.which`` tries the current directory first on Windows, so a stray
     ``adb.exe`` in the working directory would be run. Here a bare command name
-    is searched only in the ``PATH`` entries (empty and ``.`` entries are
-    skipped). A command that contains a directory part is checked as given.
-    ``windows`` forces the platform for tests; the default is the real one.
+    is searched only in the absolute ``PATH`` entries: an empty entry, ``.``,
+    ``./``, ``bin`` or any other relative entry would be resolved against the
+    current directory, so it is skipped. A command that contains a directory
+    part is checked as given. ``windows`` forces the platform for tests; the
+    default is the real one.
     """
     if windows is None:
         windows = sys.platform == "win32"
@@ -241,7 +243,7 @@ def _which(command: str, *, windows: bool | None = None) -> str | None:
         names = [command + ext for ext in extensions]
     for entry in os.environ.get("PATH", "").split(os.pathsep):
         entry = entry.strip().strip('"')
-        if not entry or entry == os.curdir:
+        if not entry or not Path(entry).is_absolute():
             continue
         for name in names:
             candidate = Path(entry, name)
@@ -258,6 +260,9 @@ def find_adb(explicit: str | None = None) -> str | None:
     ``ANDROID_SDK_ROOT``. The first place that is set decides for the explicit
     argument and ``LOGPROBE_ADB``: if what they name is not an executable,
     the result is None rather than a silent fall-back to another adb.
+    On Windows the two searches that the caller did not name (``PATH`` and the
+    SDK variables) use only absolute directories, so they never find an adb in
+    the current directory.
     """
     if explicit is not None:
         return _which(explicit)
@@ -267,10 +272,11 @@ def find_adb(explicit: str | None = None) -> str | None:
     on_path = _which("adb")
     if on_path is not None:
         return on_path
-    name = "adb.exe" if sys.platform == "win32" else "adb"
+    windows = sys.platform == "win32"
+    name = "adb.exe" if windows else "adb"
     for variable in ("ANDROID_HOME", "ANDROID_SDK_ROOT"):
         root = os.environ.get(variable)
-        if root:
+        if root and (not windows or Path(root).is_absolute()):
             found = _which(str(Path(root) / "platform-tools" / name))
             if found is not None:
                 return found
