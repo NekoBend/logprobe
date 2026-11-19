@@ -1,5 +1,7 @@
 # logprobe
 
+[![ci](https://github.com/NekoBend/logprobe/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/NekoBend/logprobe/actions/workflows/ci.yml) [![license](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![python](https://img.shields.io/badge/python-3.12%2B-blue)](#requirements)
+
 A fast, light Android logcat library for Python: read device logs live or as a
 snapshot, parse saved logcat files, filter entries and export them.
 
