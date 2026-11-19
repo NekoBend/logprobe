@@ -374,7 +374,13 @@ async def _run_command(
 
     ``cancelled`` replaces the check of the stop flag (it must include it).
     """
-    command = arun_shell(unit.device._address, unit.serial, argv, limit)
+    command = arun_shell(
+        unit.device._address,
+        unit.serial,
+        argv,
+        limit,
+        max_output=_adb.COMMAND_OUTPUT_LIMIT,
+    )
     return await _cancellable(
         command, core.cancelled if cancelled is None else cancelled
     )

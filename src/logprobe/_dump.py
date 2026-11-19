@@ -105,7 +105,12 @@ def _take_list(address: _adb.ServerAddress, serial: str) -> ListJob:
         ran: ShellResult | TimeoutError
         try:
             ran = _adb.run_shell(
-                address, serial, job.argv, _marks.COMMAND_LIMIT, _never
+                address,
+                serial,
+                job.argv,
+                _marks.COMMAND_LIMIT,
+                _never,
+                max_output=_adb.COMMAND_OUTPUT_LIMIT,
             )
         except TimeoutError as error:
             ran = error

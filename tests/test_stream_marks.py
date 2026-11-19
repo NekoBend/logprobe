@@ -684,14 +684,20 @@ def test_a_stop_while_the_marker_command_ends_wins_over_its_result(
     run_shell = _adb.run_shell
     arun_shell = _astream.arun_shell
 
-    def stopping(address: Any, serial: str, args: Any, *rest: Any) -> Any:  # noqa: ANN401
-        result = run_shell(address, serial, args, *rest)
+    def stopping(address: Any, serial: str, args: Any, *rest: Any, **named: Any) -> Any:  # noqa: ANN401
+        result = run_shell(address, serial, args, *rest, **named)
         if is_marker(list(args)):
             s.stop()
         return result
 
-    async def astopping(address: Any, serial: str, args: Any, *rest: Any) -> Any:  # noqa: ANN401
-        result = await arun_shell(address, serial, args, *rest)
+    async def astopping(
+        address: Any,  # noqa: ANN401
+        serial: str,
+        args: Any,  # noqa: ANN401
+        *rest: Any,  # noqa: ANN401
+        **named: Any,  # noqa: ANN401
+    ) -> Any:  # noqa: ANN401
+        result = await arun_shell(address, serial, args, *rest, **named)
         if is_marker(list(args)):
             s.stop()
         return result

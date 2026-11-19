@@ -2466,9 +2466,10 @@ def slow_pm_cleanup(
         serial: str,
         args: Any,  # noqa: ANN401
         timeout: float | None = 30.0,
+        max_output: int | None = None,
     ) -> Any:  # noqa: ANN401
         try:
-            return await real(address, serial, args, timeout)
+            return await real(address, serial, args, timeout, max_output)
         except asyncio.CancelledError:
             if args[0] == "pm":
                 cleaning.append(" ".join(args))
