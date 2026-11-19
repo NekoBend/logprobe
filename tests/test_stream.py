@@ -193,6 +193,7 @@ def interrupt_main_when(ready: Callable[[], bool]) -> Generator[None]:
     sender is joined while the caller's SIGINT handler is still in place.
     """
     cancel = threading.Event()
+    sending = threading.Lock()  # cancel and send never overlap
 
     def send() -> None:
         deadline = time.monotonic() + GUARD
@@ -200,16 +201,25 @@ def interrupt_main_when(ready: Callable[[], bool]) -> Generator[None]:
             if cancel.wait(0.001) or time.monotonic() > deadline:
                 return
         time.sleep(0.01)
-        if not cancel.is_set():
-            _thread.interrupt_main()
+        with sending:
+            if not cancel.is_set():
+                _thread.interrupt_main()
 
     sender = threading.Thread(target=send, daemon=True)
     sender.start()
     try:
         yield
     finally:
-        cancel.set()
-        sender.join(GUARD)
+        # A Ctrl-C sent just before the cancel can still arrive here, once; it
+        # must neither replace the test's own outcome nor skip the join.
+        for _ in range(2):
+            try:
+                with sending:
+                    cancel.set()
+                sender.join(GUARD)
+                break
+            except KeyboardInterrupt:
+                pass
         assert not sender.is_alive(), "the Ctrl-C sender did not end"
 
 
