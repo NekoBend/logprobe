@@ -185,6 +185,37 @@ def test_the_held_part_of_a_cut_stderr_packet_counts_toward_the_limit(
         asyncio.run(_aadb.arun_shell(address, SERIAL, ["cut"], 5.0, max_output=279))
 
 
+@pytest.mark.parametrize("mode", ["blocking", "async"])
+def test_the_held_part_counts_toward_the_limit_on_a_timeout(
+    one_device: FakeAdbServer, mode: str
+) -> None:
+    # As above, but the connection stays open after the cut: the command times
+    # out, and the 80 held bytes are added before the timeout is raised.
+    address = address_of(one_device)
+
+    def run(name: str, limit: int) -> object:
+        # A waiting point gates one connection, so each run has its own.
+        one_device.shell[PREFIX + name] = ShellScript(
+            steps=[("stdout", b"o" * 200), Cut("stderr", b"e" * 100, 85, hold=name)],
+            exit_status=None,
+        )
+        try:
+            if mode == "blocking":
+                return _adb.run_shell(address, SERIAL, [name], 0.5, max_output=limit)
+            return asyncio.run(
+                _aadb.arun_shell(address, SERIAL, [name], 0.5, max_output=limit)
+            )
+        finally:
+            one_device.release(name)
+
+    with pytest.raises(LogprobeError) as raised:
+        run("over", 279)
+    assert raised.value.details == {"command": "over", "limit": 279}
+    with pytest.raises(_adb.CommandTimeoutError) as timed_out:
+        run("fits", 280)
+    assert timed_out.value.stderr == b"e" * 80
+
+
 def test_the_async_commands_of_streams_and_dumps_are_limited(
     one_device: FakeAdbServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
