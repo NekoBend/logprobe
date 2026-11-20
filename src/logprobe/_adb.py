@@ -385,7 +385,9 @@ def _connect_sliced(
 
 def numeric_addrinfo(
     address: ServerAddress,
-) -> list[tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[object, ...]]]:
+) -> Sequence[
+    tuple[socket.AddressFamily, socket.SocketKind, int, str, tuple[object, ...]]
+]:
     """Return the socket addresses of ``address``, without any name lookup.
 
     The address is resolved with ``AI_NUMERICHOST | AI_NUMERICSERV``, so the
@@ -397,7 +399,7 @@ def numeric_addrinfo(
     """
     # Bytes keep CPython from running its IDNA step, which would raise
     # UnicodeError (not OSError) for a long zone name.
-    return socket.getaddrinfo(  # ty: ignore[invalid-return-type]
+    return socket.getaddrinfo(
         address.host.encode("ascii"),
         address.port,
         type=socket.SOCK_STREAM,
