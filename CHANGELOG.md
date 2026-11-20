@@ -5,6 +5,8 @@ All notable changes to logprobe are listed here. The format follows
 [PEP 440](https://peps.python.org/pep-0440/). While logprobe is in alpha, any
 release may change the API.
 
+## [Unreleased]
+
 ## [0.1.0a1] - 2026-11-20
 
 The first tagged release. It contains everything since the repository was made
@@ -81,4 +83,5 @@ commit that a user can see.
   The README says that CI does not test the free-threaded build (3.14t) and
   gives the result of a one-off check on it. (#24)
 
+[Unreleased]: https://github.com/NekoBend/logprobe/compare/v0.1.0a1...HEAD
 [0.1.0a1]: https://github.com/NekoBend/logprobe/releases/tag/v0.1.0a1
