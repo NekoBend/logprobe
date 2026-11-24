@@ -9,7 +9,7 @@ public issue for it.
 ## Supported versions
 
 logprobe is in alpha. The latest alpha release and `main` are supported.
-Fixes go into `main` and ship in the next release.
+Fixes go into `main`.
 
 ## What counts as a vulnerability
 
