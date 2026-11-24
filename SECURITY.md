@@ -8,8 +8,8 @@ public issue for it.
 
 ## Supported versions
 
-logprobe is an alpha with no release yet. Fixes go into `main`. Once an alpha
-release exists, the latest one is supported too.
+logprobe is in alpha. The latest alpha release and `main` are supported.
+Fixes go into `main`.
 
 ## What counts as a vulnerability
 
