@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
-from logprobe import Crash, Gap, LogEntry, Package, Tag, _attribution, parse_lines
+from logprobe import Crash, Gap, LogEntry, Package, Tag, parse_lines
 from logprobe._attribution import (
     DUMPSYS_PACKAGES_ARGV,
     PM_LIST_ARGV,
@@ -19,6 +19,7 @@ from logprobe._attribution import (
     Segment,
     dump_judge,
 )
+from logprobe._attribution import attributor as attributor_module
 from tests.device_facts import level_dir, load, step
 
 if TYPE_CHECKING:
@@ -484,7 +485,7 @@ def test_an_app_id_given_again_to_a_watched_package_counts_the_lines_of_others()
 def test_a_failed_first_list_makes_the_device_blind_until_a_list_succeeds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 30.0)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 30.0)
     attributor = PackageAttributor(~Package(A), serial="emu")
     fail_list(attributor, now=5.0)
     assert attributor.blind
@@ -523,7 +524,7 @@ def test_a_failed_list_after_a_good_one_keeps_the_old_list() -> None:
 def test_a_cut_list_fails_and_still_learns_about_dash_u(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 30.0)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 30.0)
     attributor = make(~Package(A), {A: APP_A})
     attributor.take_messages()
     job = attributor.list_started(10.0)
@@ -538,7 +539,7 @@ def test_a_cut_list_fails_and_still_learns_about_dash_u(
 
 
 def test_lists_are_paced(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.5)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.5)
     attributor = PackageAttributor(Package(A), serial="emu")
     assert attributor.ready_at() == float("-inf")
     give_list(attributor, {A: APP_A}, now=10.0)
@@ -550,7 +551,7 @@ def test_lists_are_paced(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_the_list_is_due_again_after_the_interval_from_its_start(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 30.0)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 30.0)
     attributor = PackageAttributor(Package(A), serial="emu")
     assert not attributor.list_due(1e9)  # no list yet: the start takes one
     job = attributor.list_started(10.0)
