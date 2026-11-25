@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, NamedTuple, Protocol, cast
 import pytest
 
 from logprobe import LogprobeError, _aadb, _adb
+from logprobe._adb import protocol as adb_protocol
+from logprobe._adb import shell as adb_shell
 from tests.fake_adb_server import (
     BAD_LENGTHS,
     FakeAdbServer,
@@ -296,7 +298,8 @@ class Blocking:
                 raise error
             real(sock, data, deadline, cancelled, idle)
 
-        monkeypatch.setattr(_adb, "_send_all", send_all)
+        monkeypatch.setattr(adb_protocol, "_send_all", send_all)
+        monkeypatch.setattr(adb_shell, "_send_all", send_all)
 
     def scripted(self, chunks: Sequence[bytes]) -> Scripted:
         sock = ScriptedSocket(chunks)

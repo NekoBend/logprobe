@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 from logprobe import LogprobeError, _adb
+from logprobe._adb import protocol as adb_protocol
+from logprobe._adb import sockets as adb_sockets
 from tests.fake_adb_server import FakeAdbServer, ShellScript, packet
 from tests.test_adb_protocol import ScriptedSocket
 
@@ -653,7 +655,8 @@ def test_socket_closed_by_the_owner_when_a_handshake_is_cancelled(
             closers.append(threading.get_ident())
         real_close(self)
 
-    monkeypatch.setattr(_adb, "_open_numeric", recording_open)
+    monkeypatch.setattr(adb_sockets, "_open_numeric", recording_open)
+    monkeypatch.setattr(adb_protocol, "_open_numeric", recording_open)
     monkeypatch.setattr(socket.socket, "close", recording_close)
     flag = Flag(0.2)
     with pytest.raises(_adb.Cancelled):
@@ -690,7 +693,7 @@ def test_connect_waits_in_slices_of_at_most_one_tick(
         seen.append(seconds)
         return False
 
-    monkeypatch.setattr(_adb, "_wait_writable", fake_wait)
+    monkeypatch.setattr(adb_sockets, "_wait_writable", fake_wait)
     # A non-routable address keeps the attempt pending; skip if refused at once.
     address = _adb.ServerAddress("10.255.255.1", 5037, is_default=False)
     flag = Flag(0.2)
@@ -742,7 +745,7 @@ def test_an_unexpected_exception_while_connecting_closes_the_socket(
         opened.append(sock)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(_adb, "_connect_sliced", interrupted)
+    monkeypatch.setattr(adb_sockets, "_connect_sliced", interrupted)
     with pytest.raises(KeyboardInterrupt):
         _adb.connect(address_of(one_device), 5.0, cancelled=never)
     assert len(opened) == 1

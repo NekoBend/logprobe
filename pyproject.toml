@@ -51,7 +51,7 @@ ignore = ["ANN204", "PLR0913", "PLR0917", "PLR2004"]
 # helpers shaped by the API under test).
 [tool.ruff.lint.per-file-ignores]
 "bench/**" = ["T201", "S603"]
-"src/logprobe/_adb.py" = ["S603"]
+"src/logprobe/_adb/server.py" = ["S603"]
 # The async client takes the same per-step "timeout" argument as the blocking one.
 "src/logprobe/_aadb.py" = ["ASYNC109"]
 # AsyncOutbox.take and AsyncLogStream.join take the same "timeout" argument as

@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from logprobe import LogprobeError, _adb
+from logprobe._adb import address as adb_address
 from tests.fake_adb_server import FakeAdbServer, free_port
 
 ADB_NAME = "adb.exe" if sys.platform == "win32" else "adb"
@@ -566,7 +567,7 @@ class StartRecorder:
 @pytest.fixture
 def closed_default_port(monkeypatch: pytest.MonkeyPatch) -> int:
     port = free_port()
-    monkeypatch.setattr(_adb, "DEFAULT_PORT", port)
+    monkeypatch.setattr(adb_address, "DEFAULT_PORT", port)
     return port
 
 
@@ -583,7 +584,7 @@ def recorder(
     **result: object,
 ) -> StartRecorder:
     rec = StartRecorder(bring_up, **result)  # ty: ignore[invalid-argument-type]
-    monkeypatch.setattr(_adb.subprocess, "run", rec)
+    monkeypatch.setattr(subprocess, "run", rec)
     return rec
 
 
@@ -754,7 +755,7 @@ def test_start_timeout_is_reported(
     def hang(argv: list[str], **_kwargs: object) -> None:
         raise subprocess.TimeoutExpired(argv, 20, stderr=b"still starting")
 
-    monkeypatch.setattr(_adb.subprocess, "run", hang)
+    monkeypatch.setattr(subprocess, "run", hang)
     error = unavailable()
     assert closed_default_port == error.details["port"]
     assert "failed" in str(error.details["reason"])
@@ -771,7 +772,7 @@ def test_start_timeout_without_output_has_no_output_detail(
     def hang(argv: list[str], **_kwargs: object) -> None:
         raise subprocess.TimeoutExpired(argv, 20)
 
-    monkeypatch.setattr(_adb.subprocess, "run", hang)
+    monkeypatch.setattr(subprocess, "run", hang)
     assert "start_server_output" not in unavailable().details
 
 

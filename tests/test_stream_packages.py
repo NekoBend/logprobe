@@ -32,7 +32,6 @@ from logprobe import (
     LogprobeError,
     Package,
     Tag,
-    _adb,
     _astream,
     _attribution,
     _marks,
@@ -41,6 +40,8 @@ from logprobe import (
 )
 from logprobe import _feed as feed_module
 from logprobe._adb import TICK
+from logprobe._adb import protocol as adb_protocol
+from logprobe._adb import sockets as adb_sockets
 from logprobe._attribution import PackageAttributor
 from logprobe._attribution import attributor as attributor_module
 from tests.device_facts import level_dir, load, step
@@ -1430,7 +1431,8 @@ def test_a_reader_that_ends_by_itself_does_not_wait_for_the_regular_list(
     end of the device does not wait for it, ``join`` does, and nothing is left
     after ``join``."""
     regular_soon(monkeypatch)
-    monkeypatch.setattr(_adb, "TICK", 10.0)
+    monkeypatch.setattr(adb_protocol, "TICK", 10.0)
+    monkeypatch.setattr(adb_sockets, "TICK", 10.0)
     monkeypatch.setattr(_marks, "COMMAND_LIMIT", 2.0)
     server.add_sequence(PM, pm_list({A: APP_A}), ShellScript([Wait("hang")]))
     threads_before = stream_threads()  # the guard's timer may outlive its cancel

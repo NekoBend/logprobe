@@ -36,6 +36,7 @@ from logprobe import (
     _dump,
     _marks,
 )
+from logprobe._adb import shell as adb_shell
 from logprobe._framing import MIN_MAX_LINE_BYTES
 from tests.fake_adb_server import Cut, FakeAdbServer, ShellScript, Wait, program_of
 
@@ -399,6 +400,7 @@ def test_waits_are_sliced(
         require_shell_v2(*args, **kwargs)  # ty: ignore[invalid-argument-type]
 
     monkeypatch.setattr(_adb, "open_shell", spy_open)
+    monkeypatch.setattr(adb_shell, "open_shell", spy_open)
     monkeypatch.setattr(_adb, "require_shell_v2", spy_features)
     original = _adb.ShellStream.read
 

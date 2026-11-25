@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from logprobe import LogprobeError, _adb
+from logprobe._adb import devices as adb_devices
+from logprobe._adb import protocol as adb_protocol
 from tests.fake_adb_server import BAD_LENGTHS, FakeAdbServer, ShellScript, packet
 
 if TYPE_CHECKING:
@@ -171,7 +173,8 @@ def test_list_devices_skips_a_serial_that_is_not_utf8(
     def reply(*_: object, **__: object) -> bytes:
         return b"bad\xffname device\nemulator-5554 device model:m\xff\n"
 
-    monkeypatch.setattr(_adb, "host_query", reply)
+    monkeypatch.setattr(adb_protocol, "host_query", reply)
+    monkeypatch.setattr(adb_devices, "host_query", reply)
     address = _adb.ServerAddress("127.0.0.1", 1, is_default=False)
     assert _adb.list_devices(address) == [
         _adb.DeviceInfo("emulator-5554", "device", model="m\ufffd")
