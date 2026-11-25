@@ -42,6 +42,7 @@ from logprobe import (
 from logprobe import _feed as feed_module
 from logprobe._adb import TICK
 from logprobe._attribution import PackageAttributor
+from logprobe._attribution import attributor as attributor_module
 from tests.device_facts import level_dir, load, step
 from tests.fake_adb_server import (
     Cut,
@@ -183,7 +184,7 @@ def quick(monkeypatch: pytest.MonkeyPatch) -> None:
     """Short reader ticks, and no pacing between two lists (tests set their own)."""
     monkeypatch.setattr(_stream, "TICK", 0.02)
     monkeypatch.setattr(_astream, "TICK", 0.02)
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.0)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.0)
 
 
 @pytest.fixture
@@ -251,7 +252,7 @@ def test_the_startup_backlog_is_attributed_from_the_list_read_before_reading(
 def test_a_device_without_dash_u_takes_later_lists_from_dumpsys_straight_away(
     server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 0.2)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 0.2)
     server.answer(PM, b"Error: Unknown option: -U\n")
     server.answer(DUMPSYS, text(recorded(24, "dumpsys_package_packages")))
     s = begin(server, mode, Package(GMS))
@@ -332,7 +333,7 @@ COMMAND_JITTER = 0.05
 def test_lists_for_new_apps_are_paced(
     server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.4)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.4)
     server.add_sequence(PM, pm_list({}), pm_list({A: NEW}), pm_list({A: NEW, B: NEW2}))
     s = begin(server, mode, Package(A, B))
     assert server.wait_reached("live", GUARD)
@@ -358,7 +359,7 @@ def test_a_reinstall_seen_by_the_regular_list_counts_the_old_lines(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 0.5)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 0.5)
     server.add_sequence(
         PM, pm_list({A: APP_A}), pm_list({A: NEW}), ShellScript([Wait("third")])
     )
@@ -718,7 +719,7 @@ def test_a_reads_time_for_its_list_counts_from_its_network_read(
 def test_a_read_that_could_list_only_after_its_time_does_not_wait(
     server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 30.0)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 30.0)
     server.add_sequence(PM, pm_list({A: APP_A}), pm_list({A: APP_A, B: NEW}))
     s = begin(server, mode, ~Package(A))
     assert server.wait_reached("live", GUARD)
@@ -744,7 +745,7 @@ def test_a_stop_or_kill_while_a_read_waits_for_the_pacing_ends_the_reader_at_onc
     # The read comes just after the start list: it waits for the pacing,
     # which ends early enough for a list within its time.
     pacing_time = _attribution.LIST_WAIT - _attribution.LIST_MIN_TIME - 0.1
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", pacing_time)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", pacing_time)
     pacing = threading.Event()
     original = PackageAttributor.ready_at
 
@@ -904,7 +905,7 @@ def test_a_regular_list_that_hangs_fails_after_the_command_limit(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 0.3)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 0.3)
     monkeypatch.setattr(_attribution, "LIST_WAIT", 0.2)  # a read's limit only
     monkeypatch.setattr(_marks, "COMMAND_LIMIT", 0.6)
     server.add_sequence(PM, pm_list({A: APP_A}), ShellScript([Wait("hang")]))
@@ -928,7 +929,7 @@ def test_a_regular_list_may_take_longer_than_a_read_may_wait(
 ) -> None:
     """The regular list does not pause reading, so it has the time of any
     device command, not the time a read may wait for a list."""
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 0.3)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 0.3)
     monkeypatch.setattr(_attribution, "LIST_WAIT", 0.2)
     server.add_sequence(PM, pm_list({A: APP_A}), pm_list({A: NEW}, Wait("slow")))
     s = begin(server, mode, Package(A))
@@ -952,8 +953,8 @@ def test_a_regular_list_may_take_longer_than_a_read_may_wait(
 def test_the_regular_list_keeps_the_pacing(
     server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.4)
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 0.05)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.4)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 0.05)
     s = begin(server, mode, Package(A), uids={A: APP_A})
     wait_until(lambda: len(records(server, PM)) >= 4)
     finish(s)
@@ -1068,7 +1069,7 @@ def test_a_flush_shorter_than_the_pacing_wait_ends_the_wait_at_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.9)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.9)
     pacing = threading.Event()
     original = PackageAttributor.ready_at
 
@@ -1220,12 +1221,12 @@ def test_a_clock_that_cannot_be_read_leaves_the_boundary_unset(
 
 def regular_soon(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the regular list due 0.3 s after the start list."""
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 0.3)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 0.3)
 
 
 def no_more_regular(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the list after the running one due only in 30 s (no third list)."""
-    monkeypatch.setattr(_attribution, "RECHECK_INTERVAL", 30.0)
+    monkeypatch.setattr(attributor_module, "RECHECK_INTERVAL", 30.0)
 
 
 def waiting_for_regular(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
@@ -1362,7 +1363,7 @@ def test_a_read_takes_its_own_list_when_the_regular_one_did_not_name_its_app(
 ) -> None:
     """The regular list started before the read arrived, so it cannot tell
     that the read's app is absent; the read's own list keeps the pacing."""
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.4)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.4)
     regular_soon(monkeypatch)
     waiting = waiting_for_regular(monkeypatch)
     server.add_sequence(
@@ -1635,7 +1636,7 @@ def test_a_flush_marker_in_the_read_that_waits_for_the_pacing_is_done(
     """The marker comes in the same read as a line whose list would have to
     wait longer than the budget: the line is delivered at once, unattributed,
     and the flush is done well within its budget."""
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.9)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.9)
     server.add_sequence(PM, pm_list({}), pm_list({B: NEW}))
     server.echo_logged = lambda tag, message: (
         uat(4, "before", NEW) + uat(5, message, 1000, tag)
@@ -1774,7 +1775,7 @@ def test_the_pacing_counts_from_the_first_command_of_a_regular_list(
     """The regular list's runner starts its command 0.3 s after the list
     began; a read's own list right after it keeps 0.4 s from that command,
     as the fake sees the commands."""
-    monkeypatch.setattr(_attribution, "LIST_INTERVAL", 0.4)
+    monkeypatch.setattr(attributor_module, "LIST_INTERVAL", 0.4)
     regular_soon(monkeypatch)
     run_commands = _stream._run_list_commands
     run_listing = _astream._run_listing
