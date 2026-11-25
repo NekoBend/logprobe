@@ -1851,7 +1851,15 @@ def test_a_flush_during_a_wait_for_room_keeps_the_time_already_waited(
     assert marked  # the flush interrupted the wait before the reader gave up
     # The rest of the limit after the marker, if any is left: had the wait before
     # the flush not counted, the limit in full would have come on top of it.
-    assert limit <= waited < max(limit, before) + 0.25 < before + limit
+    # `waited` is the queue's count, which covers only the time each put spent in
+    # the queue's line. The reader charges the interrupted put in full, from
+    # before the call to after its return, so it can give up while the queue's
+    # count is still a little below the limit (1 microsecond short was seen once
+    # on Windows; a busy runner can stretch that time to milliseconds). With
+    # `slack`, the check fails when the queue's count is more than 50 ms below
+    # the limit.
+    slack = 0.05
+    assert limit - slack <= waited < max(limit, before) + 0.25 < before + limit
     assert shape(got) == [*messages(A + B), "ring_rotated/stalled", *messages(C)]
     assert len([item for item in got if isinstance(item, Gap)]) == 1
     assert s.summary.devices[0].flush == "done"
