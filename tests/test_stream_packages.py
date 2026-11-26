@@ -68,7 +68,12 @@ from tests.test_stream_resume import (
     shape,
     staying,
 )
-from tests.test_stream_skips import _start_steps, received_sizes, unread_bytes
+from tests.test_stream_skips import (
+    _start_steps,
+    received_sizes,
+    unread_bytes,
+    whole_read,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -653,6 +658,8 @@ def test_a_reads_time_for_its_list_counts_from_its_network_read(
         uat(2 + n / 10, f"r{n}", NEW if n == 8 else 1000, "T" * 2800) for n in range(9)
     ]
     one_read = sum(len(packet(1, line)) for line in r)
+    # x and w come first, each in a network read of its own.
+    whole_read(mode, monkeypatch, one_read, len(packet(1, x)) + len(packet(1, w)))
     sizes = received_sizes(mode, monkeypatch)
     server.add_sequence(PM, pm_list({A: APP_A}), ShellScript([Wait("slow")]))
     if limited:
@@ -847,6 +854,7 @@ def test_a_stop_during_a_slow_list_delivers_the_rest_of_its_network_read(
     )
     rest = uat(1.5, "s", 1000)
     one_read = len(packet(1, big)) + len(packet(1, rest))
+    whole_read(mode, monkeypatch, one_read)
     sizes = received_sizes(mode, monkeypatch)
     server.add_sequence(PM, pm_list({A: APP_A}), ShellScript([Wait("slow")]))
     steps: list = [Wait("go"), ("stdout", big), ("stdout", rest)]
@@ -879,8 +887,10 @@ def test_a_reads_time_for_its_list_counts_from_when_its_bytes_arrived(
     logger = logging.getLogger("logprobe")
     logger.addHandler(handler)
     monkeypatch.setattr(logger, "level", logging.WARNING)
-    sizes = received_sizes(mode, monkeypatch)
     line = uat(1, "x", NEW)
+    one_read = len(packet(2, b"slow\n")) + len(packet(1, line))
+    whole_read(mode, monkeypatch, one_read)
+    sizes = received_sizes(mode, monkeypatch)
     server.add_sequence(PM, pm_list({A: APP_A}), pm_list({A: APP_A, B: NEW}))
     steps: list = [Wait("go"), ("stderr", b"slow\n"), ("stdout", line)]
     logcat = ShellScript(steps=[*steps, Wait("blocked", live=True)], coalesce=True)
@@ -893,7 +903,7 @@ def test_a_reads_time_for_its_list_counts_from_when_its_bytes_arrived(
         assert finish(s, items) == []
     finally:
         logger.removeHandler(handler)
-    assert len(packet(2, b"slow\n")) + len(packet(1, line)) in sizes
+    assert one_read in sizes
     assert shape(got) == ["x"]
     assert len(records(server, PM)) == 1  # less than a second left: no list
     assert s.summary.devices[0].unattributed == 1
@@ -1688,6 +1698,7 @@ def test_a_stop_while_the_flush_marker_is_written_delivers_the_rest_of_the_read(
     )
     rest = uat(1.5, "s", 1000)
     one_read = len(packet(1, big)) + len(packet(1, rest))
+    whole_read(mode, monkeypatch, one_read)
     sizes = received_sizes(mode, monkeypatch)
     server.add_sequence(PM, pm_list({A: APP_A}), pm_list({A: APP_A}, Wait("slow")))
     server.add_sequence("log", ShellScript([Wait("marker")]))
@@ -1955,6 +1966,7 @@ def test_a_regular_list_that_ends_during_a_network_read_waits_for_the_next_one(
     filler = b"".join(uat(1 + n / 10, f"x{n}", 1000, "T" * 2800) for n in range(3))
     late = uat(1.5, "late")
     one_read = len(packet(1, filler)) + len(packet(1, late))
+    whole_read(mode, monkeypatch, one_read)
     sizes = received_sizes(mode, monkeypatch)
     server.add_sequence(
         PM, pm_list({A: APP_A}), pm_list({A: NEW, B: APP_A}, Wait("regular"))
@@ -2032,6 +2044,7 @@ def test_a_read_that_waits_for_the_regular_list_may_be_judged_with_two_lists(
     old = b"".join(uat(1 + n / 10, f"old{n}", APP_A, "T" * 2800) for n in range(3))
     new = uat(1.5, "new", NEW)
     one_read = len(packet(1, old)) + len(packet(1, new))
+    whole_read(mode, monkeypatch, one_read)
     sizes = received_sizes(mode, monkeypatch)
     server.add_sequence(PM, pm_list(first), pm_list(second, Wait("regular")))
     steps: list = [Wait("go"), ("stdout", old), ("stdout", new)]
@@ -2056,7 +2069,7 @@ def test_a_read_that_waits_for_the_regular_list_may_be_judged_with_two_lists(
 
 
 def test_a_flush_that_times_out_during_a_list_still_delivers_the_rest_of_the_read(
-    server: FakeAdbServer, mode: Mode
+    server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One network read: the first packet fills an asyncio batch and its line
     of a new app waits for a list until the flush budget runs out. The second
@@ -2066,6 +2079,7 @@ def test_a_flush_that_times_out_during_a_list_still_delivers_the_rest_of_the_rea
     )
     notice = "uid=10077(com.example.x) expire 3 lines"
     rest = uat(1.5, "s", 1000) + uat(1.6, notice, 1000, "chatty")
+    whole_read(mode, monkeypatch, len(packet(1, big)) + len(packet(1, rest)))
     server.add_sequence(PM, pm_list({A: APP_A}), pm_list({A: APP_A}, Wait("slow")))
     steps: list = [Wait("go"), ("stdout", big), ("stdout", rest)]
     logcat = ShellScript(steps=[*steps, Wait("blocked", live=True)], coalesce=True)
