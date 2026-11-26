@@ -603,6 +603,51 @@ def received_sizes(mode: Mode, monkeypatch: pytest.MonkeyPatch) -> list[int]:
     return sizes
 
 
+def whole_read(
+    mode: Mode, monkeypatch: pytest.MonkeyPatch, size: int, start: int = 0
+) -> None:
+    """Make the blocking reader receive ``size`` bytes in one network read.
+
+    For a test whose packets go out in one coalesced write and must arrive in
+    one network read. TCP keeps no write boundaries, so the reader may receive
+    such a write in several pieces (seen on Windows). The receive that begins
+    after ``start`` bytes of output then goes on receiving until it has
+    ``size`` bytes (for about ``GUARD`` seconds at most) and returns them as
+    one read. A receive that crosses ``start``, or a read that does not come to
+    exactly ``size`` bytes, fails the reader with an AssertionError. Call it
+    before `received_sizes`, so that the sizes show the whole read. The asyncio
+    reader is left as it is.
+    """
+    if mode.is_async:
+        return
+    receive = _stream._receive
+    seen = 0
+
+    def whole_receive(sock: socket.socket) -> bytes | None:
+        nonlocal seen
+        data = receive(sock)
+        if not data:
+            return data
+        if seen < start < seen + len(data):
+            msg = f"a receive crossed the start of the write at byte {start}"
+            raise AssertionError(msg)
+        if seen == start:
+            deadline = time.monotonic() + GUARD
+            while len(data) < size and time.monotonic() < deadline:
+                more = receive(sock)
+                if more == b"":
+                    break
+                if more:
+                    data += more
+            if len(data) != size:
+                msg = f"the write of {size} bytes came as a read of {len(data)}"
+                raise AssertionError(msg)
+        seen += len(data)
+        return data
+
+    monkeypatch.setattr(_stream, "_receive", whole_receive)
+
+
 class Put(NamedTuple):
     """One put of a chunk of lines into the queue, by either reader."""
 
