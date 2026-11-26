@@ -612,9 +612,10 @@ def whole_read(
     one network read. TCP keeps no write boundaries, so the reader may receive
     such a write in several pieces (seen on Windows). The receive that begins
     after ``start`` bytes of output then goes on receiving until it has
-    ``size`` bytes (for at most ``GUARD`` seconds) and returns them as one read.
-    Call it before `received_sizes`, so that the sizes show the whole read.
-    The asyncio reader is left as it is.
+    ``size`` bytes (for about ``GUARD`` seconds at most) and returns them as
+    one read. A receive that crosses ``start``, or a read that stays short,
+    fails the reader with an AssertionError. Call it before `received_sizes`,
+    so that the sizes show the whole read. The asyncio reader is left as it is.
     """
     if mode.is_async:
         return
@@ -626,6 +627,9 @@ def whole_read(
         data = receive(sock)
         if not data:
             return data
+        if seen < start < seen + len(data):
+            msg = f"a receive crossed the start of the write at byte {start}"
+            raise AssertionError(msg)
         if seen == start:
             deadline = time.monotonic() + GUARD
             while len(data) < size and time.monotonic() < deadline:
@@ -634,6 +638,9 @@ def whole_read(
                     break
                 if more:
                     data += more
+            if len(data) < size:
+                msg = f"the write of {size} bytes arrived short: {len(data)}"
+                raise AssertionError(msg)
         seen += len(data)
         return data
 
