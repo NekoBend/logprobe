@@ -613,9 +613,10 @@ def whole_read(
     such a write in several pieces (seen on Windows). The receive that begins
     after ``start`` bytes of output then goes on receiving until it has
     ``size`` bytes (for about ``GUARD`` seconds at most) and returns them as
-    one read. A receive that crosses ``start``, or a read that stays short,
-    fails the reader with an AssertionError. Call it before `received_sizes`,
-    so that the sizes show the whole read. The asyncio reader is left as it is.
+    one read. A receive that crosses ``start``, or a read that does not come to
+    exactly ``size`` bytes, fails the reader with an AssertionError. Call it
+    before `received_sizes`, so that the sizes show the whole read. The asyncio
+    reader is left as it is.
     """
     if mode.is_async:
         return
@@ -638,8 +639,8 @@ def whole_read(
                     break
                 if more:
                     data += more
-            if len(data) < size:
-                msg = f"the write of {size} bytes arrived short: {len(data)}"
+            if len(data) != size:
+                msg = f"the write of {size} bytes came as a read of {len(data)}"
                 raise AssertionError(msg)
         seen += len(data)
         return data
