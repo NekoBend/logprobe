@@ -517,6 +517,9 @@ def test_the_limit_counts_every_wait_of_one_read(
     monkeypatch.setattr(feed_module, "CHUNK_ENTRIES", 2)  # one read, three chunks
     x = [at(0, "x0"), at(1, "x1")]
     y = [at(2 + n / 10, f"y{n}") for n in range(6)]
+    whole_read(
+        mode, monkeypatch, len(packet(1, b"".join(y))), len(packet(1, b"".join(x)))
+    )
     api_level(server, "a", b"24\n")
     server.add_sequence(
         "logcat",
@@ -579,8 +582,20 @@ def unread_bytes(mode: Mode, s: StreamLike) -> int:
         return 0
 
 
-def received_sizes(mode: Mode, monkeypatch: pytest.MonkeyPatch) -> list[int]:
-    """The sizes of the network reads of logcat output that bring bytes, in order."""
+def received_sizes(
+    mode: Mode,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    whole: int | None = None,
+    start: int = 0,
+) -> list[int]:
+    """The sizes of the network reads of logcat output that bring bytes, in order.
+
+    With ``whole``, `whole_read` first makes the blocking reader receive the
+    ``whole`` bytes that follow ``start`` bytes of output in one network read.
+    """
+    if whole is not None:
+        whole_read(mode, monkeypatch, whole, start)
     sizes: list[int] = []
     if mode.is_async:
         collect = _aadb.collect_parts
@@ -728,7 +743,8 @@ def test_the_limit_counts_every_batch_of_one_network_read(
 
     The read is one network read: its twelve packets go out in one write while
     the reader waits for room for an earlier line, and the test lets that line
-    in only once the whole write has reached the reader. The sizes the reader
+    in only once the whole write has reached the reader; `whole_read` keeps
+    the write in one blocking receive where TCP splits it. The sizes the reader
     received are checked too.
 
     The checks do not depend on when the stall happens: the limit each put of
@@ -750,7 +766,8 @@ def test_the_limit_counts_every_batch_of_one_network_read(
     c = [at(4, "c0"), at(5, "c1")]
     last = 2 + 11 / 10  # the time of r11, the last line read
     one_read = sum(len(packet(1, line)) for line in r)
-    received = received_sizes(mode, monkeypatch)
+    start = len(packet(1, b"".join(x))) + len(packet(1, w[0]))
+    received = received_sizes(mode, monkeypatch, whole=one_read, start=start)
     puts = recorded_puts(monkeypatch)
     steps: list = [
         ("stdout", b"".join(x)),
@@ -817,14 +834,16 @@ def test_an_exit_status_in_the_read_the_reader_gave_up_on_ends_the_device(
 
     The read is one network read: B and the exit packet go out in one write
     while the reader waits for room for w, and w gets in only once both
-    reached the reader. w's wait has a long limit, so the setup takes no part
+    reached the reader (`whole_read` keeps them in one blocking receive). w's
+    wait has a long limit, so the setup takes no part
     of the one under test; B's read gets the short one.
     """
     monkeypatch.setattr(_resume, "STALL_AFTER", 60.0)
     x = [at(3, "x0")]  # fills the queue of one line
     w = [at(3.5, "w")]
     one_read = len(packet(1, b"".join(B))) + len(packet(3, b"\x02"))
-    received = received_sizes(mode, monkeypatch)
+    start = len(packet(1, x[0])) + len(packet(1, w[0]))
+    received = received_sizes(mode, monkeypatch, whole=one_read, start=start)
     puts = recorded_puts(monkeypatch)
     api_level(server, "a", b"24\n")
     server.add_sequence(
@@ -919,7 +938,8 @@ def long_read_with_an_exit_status(
 
     The read is one network read: the lines, stderr and the exit packet go out
     in one write while the reader waits for room for w, and w gets in only
-    once all of it reached the reader. w's wait has a long limit; the read
+    once all of it reached the reader (`whole_read` keeps it in one blocking
+    receive). w's wait has a long limit; the read
     gets the short one. With exit status 1 a resumed connection sends
     `AFTER_LONG`; the device no longer has the read. The consumer takes x,
     waits until a put gave up, then takes the rest and stops after c1.
@@ -930,7 +950,8 @@ def long_read_with_an_exit_status(
     one_read = sum(len(packet(1, line)) for line in LONG) + len(packet(3, b"\x02"))
     if stderr:
         one_read += len(packet(2, stderr))
-    received = received_sizes(mode, monkeypatch)
+    start = len(packet(1, x[0])) + len(packet(1, w[0]))
+    received = received_sizes(mode, monkeypatch, whole=one_read, start=start)
     puts = recorded_puts(monkeypatch)
     halves = half_empty_waits(monkeypatch)
     steps: list = [
@@ -1051,7 +1072,8 @@ def test_a_stop_while_one_network_read_is_queued_delivers_the_whole_read(
     blocking reader in one piece; the stop comes while the first of them waits
     for room. The read is one network read: its packets go out in one write
     while the reader waits for room for w, and w gets in only once all of it
-    reached the reader. A line the device sends after that read reaches the
+    reached the reader (`whole_read` keeps it in one blocking receive). A line
+    the device sends after that read reaches the
     client before the stop, but the reader must not read it. With the flag the
     limit is long, so no put gives up.
     """
@@ -1060,7 +1082,8 @@ def test_a_stop_while_one_network_read_is_queued_delivers_the_whole_read(
     w = [at(3.5, "w")]
     late = at(6, "late")
     one_read = sum(len(packet(1, line)) for line in LONG)
-    received = received_sizes(mode, monkeypatch)
+    start = len(packet(1, x[0])) + len(packet(1, w[0]))
+    received = received_sizes(mode, monkeypatch, whole=one_read, start=start)
     puts = recorded_puts(monkeypatch)
     steps: list = [
         ("stdout", x[0]),
@@ -1192,7 +1215,9 @@ def held_long_read(
 
     x fills the queue of one line and w waits for room; the read goes out in
     one write and reaches the reader before the consumer takes x, so the
-    reader takes it in one network read once w is in. Without ``end`` the
+    reader takes it in one network read once w is in; for the blocking reader
+    the caller makes sure of that with `received_sizes` (``whole=``
+    `long_read_size`, ``start=LONG_READ_START``). Without ``end`` the
     connection then stays open (a live waiting point, ``blocked``); with it,
     ``end`` is written with the read and the connection is dropped. With
     ``detect_skips`` the device has an older logd. Returns the stream and the
@@ -1232,6 +1257,16 @@ def held_long_read(
     return s, one_read
 
 
+# The bytes of output before the read of `held_long_read`: x0 and w.
+LONG_READ_START = len(packet(1, at(3, "x0"))) + len(packet(1, at(3.5, "w")))
+
+
+def long_read_size(end: list[Any] | None = None) -> int:
+    """The size of the read of `held_long_read` with ``end``."""
+    size = sum(len(packet(1, line)) for line in LONG)
+    return size + sum(len(packet(_PACKET_IDS[kind], data)) for kind, data in end or [])
+
+
 def send_late(server: FakeAdbServer, mode: Mode, s: StreamLike) -> bytes:
     """Send one more line; return once it reached the reader, which has not read it."""
     late = at(6, "late")
@@ -1252,7 +1287,9 @@ def test_a_stop_while_a_flush_marker_is_written_between_batches_delivers_the_rea
     next batch (the blocking reader has queued the whole receive by then). The
     marker command waits until the stop.
     """
-    received = received_sizes(mode, monkeypatch)
+    received = received_sizes(
+        mode, monkeypatch, whole=long_read_size(), start=LONG_READ_START
+    )
     puts = recorded_puts(monkeypatch)
     server.add_sequence("log -t", ShellScript(steps=[Wait("marker")]))
     s, one_read = held_long_read(server, mode)
@@ -1293,7 +1330,9 @@ def test_a_flush_that_ends_between_batches_of_one_read_delivers_the_read(
     marker is written (it never comes back), but the write takes longer than
     the budget, so the budget is used up when the reader looks again.
     """
-    received = received_sizes(mode, monkeypatch)
+    received = received_sizes(
+        mode, monkeypatch, whole=long_read_size(), start=LONG_READ_START
+    )
     puts = recorded_puts(monkeypatch)
     if end == "failed":
         server.answer("log -t", exit_status=1)
@@ -1359,7 +1398,12 @@ def test_a_kill_still_raises_a_protocol_error_in_the_read_the_reader_took(
     ``between``: the first part went in; the asyncio reader has just gathered
     the next batch, the blocking reader has queued the whole receive.
     """
-    received = received_sizes(mode, monkeypatch)
+    received = received_sizes(
+        mode,
+        monkeypatch,
+        whole=long_read_size([("exit", b"")]),
+        start=LONG_READ_START,
+    )
     puts = recorded_puts(monkeypatch)
     if when == "stalled":
         monkeypatch.setattr(_resume, "STALL_AFTER", 60.0)  # for x and w
@@ -1446,7 +1490,12 @@ def test_leaving_the_with_block_early_keeps_a_protocol_error_the_reader_decoded(
     has the packet behind the batches it has not fed. ``batch``: the read is
     one line and the exit packet, so the packet is in the batch that waits.
     """
-    received = received_sizes(mode, monkeypatch)
+    if where == "behind":
+        whole, start = long_read_size([("exit", b"")]), LONG_READ_START
+    else:  # y and the exit packet, after x
+        whole = len(packet(1, at(3.5, "y"))) + len(packet(3, b""))
+        start = len(packet(1, at(3, "x0")))
+    received = received_sizes(mode, monkeypatch, whole=whole, start=start)
     if where == "behind":
         s, one_read = held_long_read(server, mode, end=[("exit", b"")])
         outbox = s._core.outbox
@@ -1646,9 +1695,10 @@ def test_a_start_marker_late_between_batches_of_one_read_waits_for_the_rest(
     late marker. ``exit``: logcat's exit status 2 follows the first batch; the
     stream fails with ``logcat_failed``, not with the late marker.
 
-    The first read waits until the whole read has reached the reader, so that
-    it is one network read; the time runs out once the reader fed the part
-    with b0.
+    The first read waits until the whole read has reached the reader
+    (`first_read_waits_for`), and `whole_read` makes the blocking reader take
+    it in one receive, so that it is one network read; the time runs out once
+    the reader fed the part with b0.
     """
     token = "start-" + "c" * 32
     monkeypatch.setattr(_stream, "new_marker", lambda _kind: token)
@@ -1661,7 +1711,7 @@ def test_a_start_marker_late_between_batches_of_one_read_waits_for_the_rest(
         end = b"" if rest == "broken" else b"\x02"
         tail = [("exit", end)]
         one_read = sum(len(packet(1, line)) for line in read) + len(packet(3, end))
-    received = received_sizes(mode, monkeypatch)
+    received = received_sizes(mode, monkeypatch, whole=one_read)
     puts = recorded_puts(monkeypatch)
     server.answer("date +%s", f"{int(BASE.timestamp())}\n".encode())
     steps: list = [("stdout", line) for line in read]
@@ -1719,9 +1769,11 @@ def first_read_waits_for(
 ) -> None:
     """Make the reader's first read of logcat output wait for ``size`` bytes.
 
-    The bytes must have reached the reader first, so the read takes them all.
-    With ``after``, the read that waits is the first one that starts once the
-    reads in ``received`` (from `received_sizes`) brought ``after`` bytes.
+    The bytes must have reached the reader first. That alone does not make the
+    blocking reader take them in one receive, so its callers also pass them to
+    `received_sizes` as ``whole``. With ``after``, the read that waits is the
+    first one that starts once the reads in ``received`` (from
+    `received_sizes`) brought ``after`` bytes.
     """
     sizes = [] if received is None else received
     if mode.is_async:
@@ -1779,10 +1831,13 @@ def when_fed(
 
 
 def test_a_stall_during_a_slow_flush_delivers_every_line_and_one_gap(
-    server: FakeAdbServer, mode: Mode
+    server: FakeAdbServer, mode: Mode, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     budget = 0.5
     held = [at(4, "m4"), at(4.5, "m4.5"), at(5, "m5")]  # more than half the queue
+    whole_read(
+        mode, monkeypatch, len(packet(1, b"".join(held))), len(packet(1, b"".join(A)))
+    )
     more = [at(6 + n / 100, f"c{n}") for n in range(20)]
     api_level(server, "a", b"24\n")
     server.add_sequence(
