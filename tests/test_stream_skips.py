@@ -1695,9 +1695,10 @@ def test_a_start_marker_late_between_batches_of_one_read_waits_for_the_rest(
     late marker. ``exit``: logcat's exit status 2 follows the first batch; the
     stream fails with ``logcat_failed``, not with the late marker.
 
-    The first read waits until the whole read has reached the reader, so that
-    it is one network read; the time runs out once the reader fed the part
-    with b0.
+    The first read waits until the whole read has reached the reader
+    (`first_read_waits_for`), and `whole_read` makes the blocking reader take
+    it in one receive, so that it is one network read; the time runs out once
+    the reader fed the part with b0.
     """
     token = "start-" + "c" * 32
     monkeypatch.setattr(_stream, "new_marker", lambda _kind: token)
