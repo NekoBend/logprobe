@@ -20,7 +20,8 @@ import threading
 from typing import TYPE_CHECKING, Any, Protocol, Self
 
 import logprobe
-from logprobe import _aadb, _adb, _astream, _resume
+from logprobe import _aadb, _astream, _resume
+from logprobe._adb import protocol as adb_protocol
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Iterator
@@ -277,7 +278,7 @@ class Mode:
         hook: Callable[..., LogprobeError],
     ) -> None:
         """Route the conversion of an adb FAIL message through ``hook``."""
-        monkeypatch.setattr(_aadb if self.is_async else _adb, "failure", hook)
+        monkeypatch.setattr(_aadb if self.is_async else adb_protocol, "failure", hook)
 
     def readers_running(self, s: StreamLike, serial: str) -> int:
         """How many readers (threads or tasks) of ``serial`` are alive."""
